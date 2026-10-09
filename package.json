@@ -1,0 +1,48 @@
+{
+  "name": "tz-store",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:push": "prisma db push",
+    "db:seed": "tsx prisma/seed.ts",
+    "test": "vitest run tests/storefront.test.ts",
+    "bot": "tsx bot/bot.ts",
+    "bot:menu": "tsx bot/menu-button.ts"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.51.0",
+    "@telegram-apps/sdk": "^3.11.0",
+    "@telegram-apps/sdk-react": "^3.3.0",
+    "@telegram-apps/telegram-ui": "^2.1.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.1",
+    "grammy": "^1.25.0",
+    "ioredis": "^5.4.0",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.469.0",
+    "next": "14.2.5",
+    "qrcode.react": "^3.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tailwind-merge": "^2.5.4",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@prisma/client": "^5.18.0",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.40",
+    "prisma": "^5.18.0",
+    "tailwindcss": "^3.4.10",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.9"
+  }
+}

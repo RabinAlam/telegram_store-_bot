@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+:root {
+  --tg-safe-top: env(safe-area-inset-top, 0px);
+  --tg-safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+body {
+  background: linear-gradient(180deg, #E8F3E8 0%, #DDF0E4 60%, #D8ECDF 100%);
+  min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+}
+.tg-card { @apply bg-white rounded-[14px] shadow-sm; }
+.tg-press:active { transform: scale(0.97); }
+.tg-toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(var(--tg-safe-bottom) + 84px);
+  z-index: 60;
+}
+button, a { min-height: 44px; }
+button.tight, a.tight { min-height: 0; }

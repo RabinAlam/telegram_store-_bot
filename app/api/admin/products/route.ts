@@ -1,0 +1,54 @@
+export const dynamic = 'force-dynamic';
+import { NextResponse } from 'next/server';
+import { z } from 'zod';
+import { store } from '@/lib/store';
+import { requireAdminToken } from '@/lib/admin-auth';
+export async function GET(req: Request) {
+  const denied = requireAdminToken(req);
+  if (denied) return denied;
+  return NextResponse.json({ products: store.allProducts() });
+}
+export async function PATCH(req: Request) {
+  const denied = requireAdminToken(req);
+  if (denied) return denied;
+  const j = await req.json().catch(() => ({}));
+  const p = z.object({
+    productId: z.string(),
+    priceUsdt: z.number().positive().max(100000).optional(),
+    addStock: z.number().int().min(0).max(100000).optional(),
+    logo: z.string().max(300).optional(),
+    title: z.string().min(2).max(120).optional(),
+    categorySlug: z.string().min(2).max(60).optional(),
+    desc: z.string().max(2000).optional(),
+    contents: z.string().max(2000).optional(),
+  }).safeParse(j);
+  if (!p.success) return NextResponse.json({ error: 'bad' }, { status: 400 });
+  try {
+    if (p.data.priceUsdt !== undefined) store.setPrice(p.data.productId, p.data.priceUsdt);
+    if (p.data.addStock) store.addStock(p.data.productId, p.data.addStock);
+    if (p.data.logo) store.setLogo(p.data.productId, p.data.logo);
+    if (p.data.title !== undefined || p.data.categorySlug !== undefined || p.data.desc !== undefined || p.data.contents !== undefined) {
+      store.updateProduct(p.data.productId, { title: p.data.title, categorySlug: p.data.categorySlug, desc: p.data.desc, contents: p.data.contents, logo: p.data.logo });
+    }
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'update failed' }, { status: 400 });
+  }
+  return NextResponse.json({ ok: true });
+}
+export async function POST(req: Request) {
+  const denied = requireAdminToken(req);
+  if (denied) return denied;
+  const j = await req.json().catch(() => ({}));
+  const p = z.object({
+    title: z.string().min(2).max(120),
+    categorySlug: z.string().min(2).max(60),
+    priceUsdt: z.number().positive().max(100000),
+    desc: z.string().max(2000).optional().default(''),
+    contents: z.string().max(2000).optional().default(''),
+    stock: z.number().int().min(0).max(100000).optional().default(0),
+    logo: z.string().max(300).optional().default(''),
+  }).safeParse(j);
+  if (!p.success) return NextResponse.json({ error: p.error.flatten() }, { status: 400 });
+  const created = store.addProduct(p.data);
+  return NextResponse.json({ ok: true, product: created }, { status: 201 });
+}

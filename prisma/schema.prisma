@@ -1,0 +1,83 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+enum Role { USER ADMIN }
+enum ProductStatus { ACTIVE HIDDEN }
+enum CodeStatus { AVAILABLE RESERVED SOLD }
+enum OrderStatus { PENDING PAID DELIVERED CANCELLED REFUNDING REFUNDED NEEDS_REVIEW }
+enum IntentStatus { PENDING CONFIRMED FULFILLED CANCELLED EXPIRED NEEDS_REVIEW }
+enum Provider { STARS BINANCE TRC20 BEP20 BTC }
+model User {
+  id String @id @default(cuid()); tgId BigInt @unique @map("tg_id"); username String?
+  role Role @default(USER); createdAt DateTime @default(now()); orders Order[]; notifs NotifySub[]
+  @@map("users")
+}
+model Category {
+  id String @id @default(cuid()); slug String @unique; name String; emoji String; sort Int @default(0)
+  products Product[]
+  @@map("categories")
+}
+model Product {
+  id String @id @default(cuid()); categoryId String @map("category_id")
+  category Category @relation(fields: [categoryId], references: [id])
+  title String; desc String @db.Text; contents String @db.Text
+  priceUsdt Decimal @map("price_usdt") @db.Decimal(10, 2)
+  bulkTiers Json @default("[]") @map("bulk_tiers")
+  status ProductStatus @default(ACTIVE); lowStockAt Int @default(5) @map("low_stock_at")
+  createdAt DateTime @default(now())
+  codes Code[]; orders Order[]; restocks RestockPost[]; notifs NotifySub[]
+  @@index([categoryId, status])
+  @@map("products")
+}
+model Code {
+  id String @id @default(cuid()); productId String @map("product_id")
+  product Product @relation(fields: [productId], references: [id])
+  secretEnc String @map("secret_enc"); status CodeStatus @default(AVAILABLE)
+  orderId String? @map("order_id"); order Order? @relation(fields: [orderId], references: [id])
+  reservedAt DateTime? @map("reserved_at"); soldAt DateTime? @map("sold_at")
+  @@index([productId, status])
+  @@map("codes")
+}
+model Order {
+  id String @id @default(cuid()); userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  productId String @map("product_id"); product Product @relation(fields: [productId], references: [id])
+  qty Int; unitPrice Decimal @map("unit_price") @db.Decimal(10, 2); total Decimal @db.Decimal(10, 2)
+  status OrderStatus @default(PENDING); intentId String? @unique @map("intent_id")
+  intent PaymentIntent? @relation(fields: [intentId], references: [id])
+  codes Code[]; createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+  @@map("orders")
+}
+model PaymentIntent {
+  id String @id @default(cuid()); orderId String? @map("order_id")
+  provider Provider; providerRef String? @map("provider_ref")
+  asset String; amount Decimal @db.Decimal(18, 8); address String?; memo String?; txHash String? @map("tx_hash")
+  status IntentStatus @default(PENDING); expiresAt DateTime @map("expires_at")
+  rawPayload Json @default("{}") @map("raw_payload")
+  order Order?; audits PaymentAudit[]
+  @@unique([provider, providerRef])
+  @@index([status, expiresAt])
+  @@map("payment_intents")
+}
+model PaymentAudit {
+  id String @id @default(cuid()); intentId String @map("intent_id")
+  intent PaymentIntent @relation(fields: [intentId], references: [id])
+  from String; to String; reason String?; createdAt DateTime @default(now())
+  @@index([intentId, createdAt])
+  @@map("payment_audits")
+}
+model RestockPost {
+  id String @id @default(cuid()); productId String @map("product_id")
+  product Product @relation(fields: [productId], references: [id])
+  qtyAdded Int @map("qty_added"); message String @db.Text; createdAt DateTime @default(now())
+  @@index([createdAt])
+  @@map("restock_posts")
+}
+model NotifySub {
+  id String @id @default(cuid()); userId String @map("user_id")
+  user User @relation(fields: [userId], references: [id])
+  productId String @map("product_id"); product Product @relation(fields: [productId], references: [id])
+  createdAt DateTime @default(now())
+  @@unique([userId, productId])
+  @@map("notify_subs")
+}

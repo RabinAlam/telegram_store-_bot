@@ -1,0 +1,20 @@
+openapi: 3.0.0
+info:
+  title: TZ Store Admin API
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      summary: Health
+      responses:
+        '200': { description: OK }
+  /api/auth/login:
+    post:
+      summary: Admin login
+      responses:
+        '200': { description: tokens }
+  /webhooks/binance-pay:
+    post:
+      summary: Binance Pay webhook (HMAC-SHA512 verified, idempotent)
+      responses:
+        '200': { description: SUCCESS }

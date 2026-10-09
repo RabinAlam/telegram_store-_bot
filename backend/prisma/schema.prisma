@@ -1,0 +1,231 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  MANAGER
+  SUPPORT
+}
+
+enum UserStatus {
+  ACTIVE
+  BANNED
+}
+
+enum DeliveryMode {
+  AUTO
+  MANUAL
+}
+
+enum PaymentMethod {
+  BINANCE_PAY
+  WALLET
+  MANUAL_CRYPTO
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+enum WalletTxType {
+  DEPOSIT
+  PURCHASE
+  REFERRAL
+  ADMIN_ADJUST
+}
+
+enum BroadcastTarget {
+  ALL
+  SEGMENT
+}
+
+enum BroadcastStatus {
+  DRAFT
+  QUEUED
+  SENDING
+  DONE
+}
+
+model Admin {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String   @map("password_hash")
+  role         AdminRole @default(SUPPORT)
+  totpSecret   String?   @map("totp_secret")
+  lastLoginAt  DateTime? @map("last_login_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  auditLogs    AuditLog[]
+  walletTxns   WalletTransaction[] @relation("AdminAdjustments")
+
+  @@map("admins")
+}
+
+model User {
+  telegramId       BigInt     @unique @map("telegram_id")
+  username         String?
+  firstName        String?    @map("first_name")
+  walletBalance    Decimal    @default(0) @map("wallet_balance") @db.Decimal(10, 2)
+  referralCode     String     @unique @map("referral_code")
+  referredByUserId BigInt?    @map("referred_by_user_id")
+  referredBy       User?      @relation("Referrals", fields: [referredByUserId], references: [telegramId])
+  referrals        User[]     @relation("Referrals")
+  referralEarnings Decimal    @default(0) @map("referral_earnings") @db.Decimal(10, 2)
+  status           UserStatus @default(ACTIVE)
+  createdAt        DateTime   @default(now()) @map("created_at")
+  orders           Order[]
+  walletTxns       WalletTransaction[]
+
+  @@index([createdAt])
+  @@map("users")
+}
+
+model Category {
+  id       String    @id @default(cuid())
+  name     String    @unique
+  emoji    String    @default("📦")
+  sortOrder Int      @default(0) @map("sort_order")
+  isActive Boolean   @default(true) @map("is_active")
+  products Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id               String       @id @default(cuid())
+  categoryId       String       @map("category_id")
+  category         Category     @relation(fields: [categoryId], references: [id])
+  name             String
+  description      String       @db.Text
+  priceUsdt        Decimal      @map("price_usdt") @db.Decimal(10, 2)
+  isActive         Boolean      @default(true) @map("is_active")
+  deliveryMode     DeliveryMode @default(AUTO) @map("delivery_mode")
+  deliveryTemplate String       @default("") @map("delivery_template") @db.Text
+  sortOrder        Int          @default(0) @map("sort_order")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  stock            StockItem[]
+  orders           Order[]
+
+  @@index([categoryId, isActive])
+  @@map("products")
+}
+
+model StockItem {
+  id        String   @id @default(cuid())
+  productId String   @map("product_id")
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  data      String   @db.Text
+  isSold    Boolean  @default(false) @map("is_sold")
+  orderId   String?  @map("order_id")
+  order     Order?   @relation(fields: [orderId], references: [id])
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([productId, isSold])
+  @@map("stock_items")
+}
+
+model Order {
+  id             String         @id @default(cuid())
+  orderNo        String         @unique @map("order_no")
+  userId         BigInt         @map("user_id")
+  user           User           @relation(fields: [userId], references: [telegramId])
+  productId      String         @map("product_id")
+  product        Product        @relation(fields: [productId], references: [id])
+  qty            Int            @default(1)
+  amountUsdt     Decimal        @map("amount_usdt") @db.Decimal(10, 2)
+  paymentMethod  PaymentMethod  @map("payment_method")
+  paymentStatus  PaymentStatus  @default(PENDING) @map("payment_status")
+  deliveryStatus DeliveryStatus @default(PENDING) @map("delivery_status")
+  binancePayOrderNo String?     @map("binance_pay_order_no")
+  txid           String?
+  deliveredData  String?        @map("delivered_data") @db.Text
+  createdAt      DateTime       @default(now()) @map("created_at")
+  stockItems     StockItem[]
+  walletTxns     WalletTransaction[]
+
+  @@index([userId, createdAt])
+  @@index([paymentStatus, createdAt])
+  @@map("orders")
+}
+
+model WalletTransaction {
+  id           String      @id @default(cuid())
+  userId       BigInt      @map("user_id")
+  user         User        @relation(fields: [userId], references: [telegramId])
+  type         WalletTxType
+  amount       Decimal     @db.Decimal(10, 2)
+  balanceAfter Decimal     @map("balance_after") @db.Decimal(10, 2)
+  note         String      @default("")
+  orderId      String?     @map("order_id")
+  order        Order?      @relation(fields: [orderId], references: [id])
+  adminId      String?     @map("admin_id")
+  admin        Admin?      @relation("AdminAdjustments", fields: [adminId], references: [id])
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("wallet_transactions")
+}
+
+model BinancePayment {
+  id              String    @id @default(cuid())
+  merchantOrderNo String    @unique @map("merchant_order_no")
+  bizOrderId      String?   @map("biz_order_id")
+  amount          Decimal   @db.Decimal(10, 2)
+  currency        String    @default("USDT")
+  status          String    @default("PENDING")
+  rawWebhook      Json      @default("{}") @map("raw_webhook")
+  verifiedAt      DateTime? @map("verified_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("binance_payments")
+}
+
+model Broadcast {
+  id         String           @id @default(cuid())
+  title      String
+  text       String           @db.Text
+  targetType BroadcastTarget  @default(ALL) @map("target_type")
+  sentCount  Int              @default(0) @map("sent_count")
+  status     BroadcastStatus  @default(DRAFT)
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@map("broadcasts")
+}
+
+model Setting {
+  key   String @id
+  value Json
+
+  @@map("settings")
+}
+
+model AuditLog {
+  id       String   @id @default(cuid())
+  adminId  String   @map("admin_id")
+  admin    Admin    @relation(fields: [adminId], references: [id])
+  action   String
+  entity   String
+  entityId String   @map("entity_id")
+  before   Json?
+  after    Json?
+  ip       String   @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([adminId, createdAt])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}

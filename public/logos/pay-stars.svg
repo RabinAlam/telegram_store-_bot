@@ -1,0 +1,5 @@
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Telegram Stars">
+<defs><linearGradient id="sg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4A90D9"/><stop offset="1" stop-color="#50A8EB"/></linearGradient></defs>
+<circle cx="12" cy="12" r="12" fill="url(#sg)"/>
+<path fill="#fff" d="M12 5.5l2.05 4.16 4.59.67-3.32 3.24.78 4.57L12 15.9l-4.1 2.24.78-4.57-3.32-3.24 4.59-.67z"/>
+</svg>
