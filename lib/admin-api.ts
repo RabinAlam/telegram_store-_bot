@@ -144,6 +144,7 @@ export async function sharedProduct(id: string) {
 }
 
 export async function syncOrderToBackend(order: { orderNo: string; userTg: string; productId: string; qty: number; amountUsdt: number }) {
+  if (process.env.VITEST) return false;
   const prisma = db();
   if (prisma) {
     try {
@@ -162,21 +163,40 @@ export async function syncOrderToBackend(order: { orderNo: string; userTg: strin
         },
         update: {},
       });
-      const prod = await prisma.product.findUnique({ where: { id: order.productId } });
+      let prod = await prisma.product.findUnique({ where: { id: order.productId } });
+      if (!prod) {
+        // Fallback: associate with an existing category if product record wasn't seeded yet
+        const firstCat = await prisma.category.findFirst();
+        if (firstCat) {
+          prod = await prisma.product.create({
+            data: {
+              id: order.productId,
+              categoryId: firstCat.id,
+              name: order.productId,
+              description: order.productId,
+              priceUsdt: order.amountUsdt / (order.qty || 1),
+              isActive: true,
+            },
+          });
+        }
+      }
       if (prod) {
         await prisma.order.upsert({
           where: { orderNo: order.orderNo },
           create: {
             orderNo: order.orderNo,
             userId: tgId,
-            productId: order.productId,
+            productId: prod.id,
             qty: order.qty,
             amountUsdt: order.amountUsdt,
             paymentMethod: 'BINANCE_PAY',
             paymentStatus: 'PENDING',
             deliveryStatus: 'PENDING',
           },
-          update: {},
+          update: {
+            amountUsdt: order.amountUsdt,
+            qty: order.qty,
+          },
         });
         return true;
       }
@@ -186,3 +206,87 @@ export async function syncOrderToBackend(order: { orderNo: string; userTg: strin
   }
   return false;
 }
+
+export async function sharedOrder(orderNo: string) {
+  const prisma = db();
+  if (prisma) {
+    try {
+      const dbOrder = await prisma.order.findUnique({
+        where: { orderNo },
+        include: {
+          product: {
+            include: { category: true },
+          },
+          stockItems: true,
+        },
+      });
+      if (dbOrder) {
+        let deliveries: Array<{ login: string; password: string }> | undefined = undefined;
+        if (dbOrder.deliveredData) {
+          try {
+            deliveries = JSON.parse(dbOrder.deliveredData);
+          } catch {
+            deliveries = undefined;
+          }
+        } else if (dbOrder.stockItems && dbOrder.stockItems.length > 0) {
+          deliveries = dbOrder.stockItems.map((s) => {
+            const parts = s.data.split(':');
+            return { login: parts[0] || 'account', password: parts[1] || s.data };
+          });
+        }
+        return {
+          id: dbOrder.orderNo,
+          userTg: dbOrder.userId.toString(),
+          productId: dbOrder.productId,
+          qty: dbOrder.qty,
+          unitPrice: Number(dbOrder.amountUsdt) / (dbOrder.qty || 1),
+          total: Number(dbOrder.amountUsdt),
+          status: dbOrder.paymentStatus,
+          createdAt: dbOrder.createdAt.toISOString(),
+          code: dbOrder.deliveredData ?? undefined,
+          deliveries,
+          product: dbOrder.product ? {
+            id: dbOrder.product.id,
+            title: dbOrder.product.name,
+            desc: dbOrder.product.description,
+            priceUsdt: Number(dbOrder.product.priceUsdt),
+            categorySlug: dbOrder.product.category ? slugOf(dbOrder.product.category.name) : 'general',
+            logo: dbOrder.product.category ? (LOGO_OVERRIDES[slugOf(dbOrder.product.category.name)] ?? `/logos/${slugOf(dbOrder.product.category.name)}.svg`) : '/logos/general.svg',
+          } : null,
+        };
+      }
+    } catch (e) {
+      console.warn('Prisma sharedOrder error:', e);
+    }
+  }
+  return null;
+}
+
+export async function sharedOrdersByUser(userTg: string) {
+  const prisma = db();
+  if (prisma) {
+    try {
+      let tgId: bigint;
+      try { tgId = BigInt(userTg); } catch { tgId = BigInt(999999999); }
+      const dbOrders = await prisma.order.findMany({
+        where: { userId: tgId },
+        orderBy: { createdAt: 'desc' },
+        include: { product: true },
+      });
+      return dbOrders.map((o) => ({
+        id: o.orderNo,
+        userTg: o.userId.toString(),
+        productId: o.productId,
+        qty: o.qty,
+        unitPrice: Number(o.amountUsdt) / (o.qty || 1),
+        total: Number(o.amountUsdt),
+        status: o.paymentStatus,
+        createdAt: o.createdAt.toISOString(),
+      }));
+    } catch (e) {
+      console.warn('Prisma sharedOrdersByUser error:', e);
+    }
+  }
+  return null;
+}
+

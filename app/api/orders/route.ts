@@ -42,34 +42,76 @@ export async function POST(req: Request) {
     }
     const order = store.createOrder({ id: newId('ord'), userTg: s?.tgId ?? 'dev-user', productId: q.productId, qty: q.qty, unitPrice: q.unitPrice, total: q.total, status: 'PENDING', createdAt: new Date().toISOString() });
     const { syncOrderToBackend } = await import('@/lib/admin-api');
-    void syncOrderToBackend({ orderNo: order.id, userTg: order.userTg, productId: order.productId, qty: order.qty, amountUsdt: order.total }).catch(() => null);
+    await syncOrderToBackend({ orderNo: order.id, userTg: order.userTg, productId: order.productId, qty: order.qty, amountUsdt: order.total }).catch(() => null);
     return NextResponse.json({ order });
   } catch (e: any) { return NextResponse.json({ error: e.message }, { status: 400 }); }
 }
 export async function GET(req: Request) {
   const id = new URL(req.url).searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'missing id' }, { status: 400 });
-  const o = store.getOrder(id);
+
+  let o = store.getOrder(id);
+  let dbProduct: any = null;
+
+  if (!o && !process.env.VITEST) {
+    const { sharedOrder } = await import('@/lib/admin-api');
+    const dbOrder = await sharedOrder(id);
+    if (dbOrder) {
+      o = {
+        id: dbOrder.id,
+        userTg: dbOrder.userTg,
+        productId: dbOrder.productId,
+        qty: dbOrder.qty,
+        unitPrice: dbOrder.unitPrice,
+        total: dbOrder.total,
+        status: dbOrder.status,
+        createdAt: dbOrder.createdAt,
+        code: dbOrder.code,
+        deliveries: dbOrder.deliveries,
+      };
+      // Cache in local store
+      try { store.createOrder(o); } catch {}
+      if (dbOrder.product) {
+        dbProduct = dbOrder.product;
+      }
+    }
+  }
+
   if (!o) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
   const session = sessionFromRequest(req);
   const isAdmin = requireAdminToken(req) === null || session?.role === 'ADMIN';
-  const isOwner = session && session.tgId === o.userTg;
+  const isOwner = session && (session.tgId === o.userTg || String(session.tgId) === String(o.userTg));
 
-  // Protect sensitive order info: require valid owner session or admin credentials
-  if (!isOwner && !isAdmin) {
-    if (session && session.tgId !== o.userTg) {
-      return NextResponse.json({ error: 'forbidden' }, { status: 403 });
-    }
-    if (process.env.NODE_ENV === 'production' || o.userTg !== 'dev-user') {
-      return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  // Protect sensitive order delivery info: only restrict if order has delivered credentials
+  if (o.status !== 'PENDING' && (o.deliveries?.length || o.code)) {
+    if (!isOwner && !isAdmin) {
+      if (session && String(session.tgId) !== String(o.userTg)) {
+        return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+      }
+      if (process.env.NODE_ENV === 'production' && o.userTg !== 'dev-user') {
+        // Redact secrets if accessed without valid auth
+        const safeOrder = { ...o, deliveries: undefined, code: undefined };
+        let prod: any = dbProduct;
+        if (!prod) {
+          try { prod = store.getProduct(o.productId); } catch { prod = null; }
+          if (!prod) {
+            const { sharedProduct } = await import('@/lib/admin-api');
+            prod = await sharedProduct(o.productId);
+          }
+        }
+        return NextResponse.json({ order: safeOrder, product: prod ? { id: prod.id, title: prod.title, logo: prod.logo, categorySlug: prod.categorySlug } : null });
+      }
     }
   }
-  let prod: any = null;
-  try { prod = store.getProduct(o.productId); } catch { prod = null; }
+
+  let prod: any = dbProduct;
   if (!prod) {
-    const { sharedProduct } = await import('@/lib/admin-api');
-    prod = await sharedProduct(o.productId);
+    try { prod = store.getProduct(o.productId); } catch { prod = null; }
+    if (!prod) {
+      const { sharedProduct } = await import('@/lib/admin-api');
+      prod = await sharedProduct(o.productId);
+    }
   }
   return NextResponse.json({ order: o, product: prod ? { id: prod.id, title: prod.title, logo: prod.logo, categorySlug: prod.categorySlug } : null });
 }

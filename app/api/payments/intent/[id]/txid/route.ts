@@ -11,7 +11,22 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   const j = await req.json().catch(() => ({}));
   const p = schema.safeParse({ txid: String(j.txid ?? '').trim() });
   if (!p.success) return NextResponse.json({ error: 'Enter a valid TxID / Order ID (6+ chars)' }, { status: 400 });
-  const it = store.getIntent(params.id);
+  let it = store.getIntent(params.id);
+  if (!it && !process.env.VITEST) {
+    try {
+      const { db } = await import('@/lib/db');
+      const prisma = db();
+      if (prisma) {
+        const row = await prisma.setting.findUnique({ where: { key: `intent:${params.id}` } });
+        if (row && row.value) {
+          it = row.value as any;
+          if (it) {
+            try { store.createIntent(it); } catch {}
+          }
+        }
+      }
+    } catch {}
+  }
   if (!it) return NextResponse.json({ error: 'not found' }, { status: 404 });
   if (it.status === 'CONFIRMED' || it.status === 'FULFILLED') return NextResponse.json({ ok: true, state: 'already', intent: it });
   if (it.status === 'CANCELLED' || it.status === 'EXPIRED') return NextResponse.json({ error: 'deposit expired — create a new one' }, { status: 400 });

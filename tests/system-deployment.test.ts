@@ -138,6 +138,13 @@ describe('SYSTEM TESTS (End-to-End Live Workflow & Data Flow)', { timeout: 15000
     expect(orderData.order?.id).toBeDefined();
     const orderId = orderData.order.id;
 
+    // Verify order is retrievable on another lambda instance via GET /api/orders?id=...
+    const getOrderRes = await fetch(`${LIVE_URL}/api/orders?id=${orderId}`);
+    expect(getOrderRes.status).toBe(200);
+    const getOrderData = await getOrderRes.json();
+    expect(getOrderData.order?.id).toBe(orderId);
+    expect(getOrderData.product?.id).toBe('p-github-student');
+
     // 2. Create Binance payment intent
     const intentRes = await fetch(`${LIVE_URL}/api/payments/intent`, {
       method: 'POST',

@@ -32,6 +32,25 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
   const [binanceOpen, setBinanceOpen] = useState(false);
 
   useEffect(() => backButton(() => router.back()), [router]);
+
+  useEffect(() => {
+    if (params.orderId?.startsWith('p-')) {
+      (async () => {
+        try {
+          const r = await fetch('/api/orders', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...tzAuthHeader() },
+            body: JSON.stringify({ productId: params.orderId, qty: 1 }),
+          });
+          const j = await r.json();
+          if (j?.order?.id) {
+            router.replace(`/checkout/${j.order.id}`);
+          }
+        } catch {}
+      })();
+    }
+  }, [params.orderId, router]);
+
   const { data, isLoading } = useQuery({
     queryKey: ['order', params.orderId],
     queryFn: async () => (await fetch(`/api/orders?id=${params.orderId}`, { headers: { ...tzAuthHeader() } })).json(),
@@ -67,7 +86,41 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
     }
   }
 
-  if (data?.error) return <main className="space-y-3 pt-4"><Card><p className="font-bold">Order not found</p><p className="mt-1 text-sm text-gray-600">This order does not exist or expired.</p></Card></main>;
+  if (data?.error) {
+    return (
+      <main className="space-y-3 pt-4">
+        <Card className="p-5 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-amber-50 text-2xl">
+            📦
+          </div>
+          <h1 className="mt-3 text-[17px] font-bold text-gray-900">Order not found</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            This order does not exist or may have expired.
+          </p>
+          <div className="mt-4 flex flex-col gap-2">
+            <button
+              onClick={() => router.push('/home')}
+              className="w-full rounded-[14px] bg-[#57C25E] px-4 py-3 text-[15px] font-bold text-white shadow-sm transition hover:brightness-95 tg-press"
+            >
+              🛍️ Browse Products
+            </button>
+            <button
+              onClick={() => router.push('/orders')}
+              className="w-full rounded-[14px] bg-gray-100 px-4 py-3 text-[15px] font-bold text-gray-800 transition hover:bg-gray-200 tg-press"
+            >
+              📋 My Orders
+            </button>
+          </div>
+        </Card>
+        <button
+          onClick={() => router.back()}
+          className="w-full rounded-[14px] bg-red-500 px-4 py-3 text-[15px] font-bold text-white"
+        >
+          ⬅️ Back
+        </button>
+      </main>
+    );
+  }
   if (isLoading || !order)
     return (
       <main className="space-y-3 pt-4">
