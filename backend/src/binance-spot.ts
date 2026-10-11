@@ -52,7 +52,7 @@ export function matchDeposit(
   }
   if (expected.txid) {
     const tx = expected.txid.trim().toLowerCase();
-    const hit = byAmount.find((d) => (d.txId ?? '').toLowerCase().includes(tx) || tx.includes((d.txId ?? '').toLowerCase()));
+    const hit = byAmount.find((d) => (d.txId ?? '').toLowerCase().trim() === tx);
     if (!hit) return { matched: false, reason: 'amount matches but TXID not found — check the ID or approve manually' };
     return { matched: true, deposit: hit, reason: `matched $${hit.amount} tx ${hit.txId}` };
   }

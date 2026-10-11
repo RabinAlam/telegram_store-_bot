@@ -16,7 +16,16 @@ export type TzProduct = {
 
 async function tzFetch(path: string, opts: RequestInit = {}) {
   const token = (import.meta as unknown as { env: Record<string, string> }).env?.VITE_TZ_ADMIN_TOKEN ?? '';
-  const r = await fetch(`/tz-api${path}`, { ...opts, headers: { 'content-type': 'application/json', ...(token ? { 'x-admin-token': token } : {}), ...(opts.headers ?? {}) } });
+  const access = typeof localStorage !== 'undefined' ? (localStorage.getItem('tz_access') ?? '') : '';
+  const r = await fetch(`/api${path}`, {
+    ...opts,
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { 'x-admin-token': token } : {}),
+      ...(access ? { authorization: `Bearer ${access}` } : {}),
+      ...(opts.headers ?? {}),
+    },
+  });
   if (!r.ok) throw new Error(`tz-store ${r.status}`);
   return r.json();
 }
@@ -49,7 +58,11 @@ export const tzVaultAdd = (productId: string, login: string, password: string) =
 export const tzVaultImport = (productId: string, codes: string) =>
   tzFetch('/admin/vault', { method: 'POST', body: JSON.stringify({ productId, codes }) }) as Promise<{ ok: boolean; imported: number; skipped: number }>;
 export const tzVaultDelete = (id: string) =>
-  tzFetch('/admin/vault', { method: 'DELETE', body: JSON.stringify({ id }) }) as Promise<{ ok: boolean }>;
+  tzFetch('/admin/vault', { method: 'DELETE', body: JSON.stringify({ id, force: true }) }) as Promise<{ ok: boolean }>;
+export const tzVaultUpdate = (id: string, patch: { login?: string; password?: string; status?: 'AVAILABLE' | 'SOLD' }) =>
+  tzFetch('/admin/vault', { method: 'PATCH', body: JSON.stringify({ id, ...patch }) }) as Promise<{ ok: boolean; item: any }>;
+export const tzDeleteProduct = (id: string) =>
+  tzFetch('/admin/products', { method: 'DELETE', body: JSON.stringify({ id }) }) as Promise<{ ok: boolean }>;
 export const tzFulfillOrder = (orderId: string) =>
   tzFetch('/admin/orders/fulfill', { method: 'POST', body: JSON.stringify({ orderId }) }) as Promise<{ ok: boolean; status: string }>;
 

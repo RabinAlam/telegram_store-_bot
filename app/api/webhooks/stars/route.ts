@@ -5,6 +5,16 @@ import { fulfillOrder } from '@/lib/fulfill';
 // Idempotent: dedupe by payload (= intent id).
 const seen = new Set<string>();
 export async function POST(req: Request) {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+  const token = req.headers.get('x-telegram-bot-api-secret-token') || req.headers.get('x-admin-token');
+  if (secret) {
+    if (!token || (token !== secret && token !== process.env.ADMIN_API_TOKEN)) {
+      return NextResponse.json({ error: 'unauthorized webhook' }, { status: 401 });
+    }
+  } else if (process.env.NODE_ENV === 'production') {
+    return NextResponse.json({ error: 'unauthorized: telegram webhook secret required in production' }, { status: 401 });
+  }
+
   const update = await req.json().catch(() => ({}));
   if (update.pre_checkout_query) {
     const token = process.env.BOT_TOKEN ?? '';

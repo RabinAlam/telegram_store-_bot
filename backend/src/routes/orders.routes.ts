@@ -53,40 +53,88 @@ ordersRouter.get('/:id', requireAuth, async (req, res) => {
 });
 
 async function creditWallet(userTelegramId: bigint, amount: Prisma.Decimal | number | string, note: string, orderId?: string, adminId?: string, type: 'DEPOSIT' | 'PURCHASE' | 'REFERRAL' | 'ADMIN_ADJUST' = 'DEPOSIT') {
-  const user = await prisma.user.findUnique({ where: { telegramId: userTelegramId } });
-  if (!user) throw new Error('user not found');
-  const next = new Prisma.Decimal(user.walletBalance).plus(new Prisma.Decimal(amount));
-  await prisma.$transaction([
-    prisma.user.update({ where: { telegramId: userTelegramId }, data: { walletBalance: next } }),
-    prisma.walletTransaction.create({ data: { userId: userTelegramId, type: type as never, amount: new Prisma.Decimal(amount), balanceAfter: next, note, orderId, adminId } }),
-  ]);
-  return next;
+  const decAmount = new Prisma.Decimal(amount);
+  const updatedBalance = await prisma.$transaction(async (tx) => {
+    const updated = await tx.user.update({
+      where: { telegramId: userTelegramId },
+      data: { walletBalance: { increment: decAmount } },
+      select: { walletBalance: true },
+    });
+    await tx.walletTransaction.create({
+      data: {
+        userId: userTelegramId,
+        type: type as never,
+        amount: decAmount,
+        balanceAfter: updated.walletBalance,
+        note,
+        orderId,
+        adminId,
+      },
+    });
+    return updated.walletBalance;
+  });
+  return updatedBalance;
 }
 
 export async function fulfillOrder(orderId: string) {
   const order = await prisma.order.findUnique({ where: { id: orderId }, include: { product: true, user: true } });
   if (!order || order.paymentStatus !== 'PAID') return;
   if (order.product.deliveryMode === 'AUTO') {
-    const items = await prisma.stockItem.findMany({ where: { productId: order.productId, isSold: false }, take: order.qty });
-    if (items.length < order.qty) {
-      await prisma.order.update({ where: { id: orderId }, data: { deliveryStatus: 'FAILED' } });
+    // Atomic stock allocation using SELECT FOR UPDATE SKIP LOCKED inside interactive transaction
+    const allocated = await prisma.$transaction(async (tx) => {
+      let picked: Array<{ id: string; data: string }> = [];
+      try {
+        picked = await tx.$queryRaw<{ id: string; data: string }[]>`
+          SELECT id, data FROM "stock_items"
+          WHERE "product_id" = ${order.productId} AND "is_sold" = false
+          ORDER BY "created_at" ASC
+          LIMIT ${order.qty}
+          FOR UPDATE SKIP LOCKED
+        `;
+      } catch {
+        // Fallback for non-Postgres test runtimes
+        picked = await tx.stockItem.findMany({
+          where: { productId: order.productId, isSold: false },
+          take: order.qty,
+          select: { id: true, data: true },
+        });
+      }
+
+      if (picked.length < order.qty) {
+        await tx.order.update({ where: { id: orderId }, data: { deliveryStatus: 'FAILED' } });
+        return null;
+      }
+
+      const ids = picked.map((i) => i.id);
+      await tx.stockItem.updateMany({
+        where: { id: { in: ids } },
+        data: { isSold: true, orderId },
+      });
+      await tx.order.update({
+        where: { id: orderId },
+        data: {
+          deliveryStatus: 'DELIVERED',
+          deliveredData: picked.map((i) => i.data).join('\n'),
+        },
+      });
+      return picked;
+    });
+
+    if (!allocated) {
       await sendUserMessage(order.userId.toString(), `⚠️ Order <code>${order.orderNo}</code> paid but out of stock. Support will deliver manually.`);
       return;
     }
-    await prisma.$transaction([
-      prisma.stockItem.updateMany({ where: { id: { in: items.map((i) => i.id) } }, data: { isSold: true, orderId } }),
-      prisma.order.update({ where: { id: orderId }, data: { deliveryStatus: 'DELIVERED', deliveredData: items.map((i) => i.data).join('\n') } }),
-    ]);
-    const delivered = items.map((i) => `<code>${escapeHtml(i.data)}</code>`).join('\n');
+
+    const delivered = allocated.map((i) => `<code>${escapeHtml(i.data)}</code>`).join('\n');
     const tpl = renderTemplate(order.product.deliveryTemplate || '{{keys}}', {
-      keys: items.map((i) => i.data).join('\n'),
+      keys: allocated.map((i) => i.data).join('\n'),
       username: order.user.username ?? '', orderNo: order.orderNo, product: order.product.name,
     });
     await sendUserMessage(order.userId.toString(), `✅ <b>Order ${order.orderNo} delivered!</b>\n\n${escapeHtml(tpl)}\n\n${delivered}`);
   } else {
     await sendUserMessage(order.userId.toString(), `✅ Payment received for <code>${order.orderNo}</code>. Manual delivery within 24h — support will contact you.`);
   }
-  // Referral commission
+  // Referral commission with atomic increment
   if (order.user.referredByUserId) {
     const s = await prisma.setting.findUnique({ where: { key: 'referralPercent' } });
     const pct = Number((s?.value as number) ?? 5);
@@ -94,12 +142,25 @@ export async function fulfillOrder(orderId: string) {
       const bonus = new Prisma.Decimal(order.amountUsdt).mul(pct).div(100);
       const ref = await prisma.user.findUnique({ where: { telegramId: order.user.referredByUserId } });
       if (ref) {
-        const next = new Prisma.Decimal(ref.walletBalance).plus(bonus);
-        const nextEarn = new Prisma.Decimal(ref.referralEarnings).plus(bonus);
-        await prisma.$transaction([
-          prisma.user.update({ where: { telegramId: ref.telegramId }, data: { walletBalance: next, referralEarnings: nextEarn } }),
-          prisma.walletTransaction.create({ data: { userId: ref.telegramId, type: 'REFERRAL', amount: bonus, balanceAfter: next, note: `Referral ${pct}% from order ${order.orderNo}` } }),
-        ]);
+        await prisma.$transaction(async (tx) => {
+          const updatedRef = await tx.user.update({
+            where: { telegramId: ref.telegramId },
+            data: {
+              walletBalance: { increment: bonus },
+              referralEarnings: { increment: bonus },
+            },
+            select: { walletBalance: true },
+          });
+          await tx.walletTransaction.create({
+            data: {
+              userId: ref.telegramId,
+              type: 'REFERRAL',
+              amount: bonus,
+              balanceAfter: updatedRef.walletBalance,
+              note: `Referral ${pct}% from order ${order.orderNo}`,
+            },
+          });
+        });
       }
     }
   }
@@ -117,9 +178,32 @@ ordersRouter.post('/:id/action', requireAuth, requireRole('SUPER_ADMIN', 'MANAGE
     await prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } });
     await fulfillOrder(order.id);
   } else if (action === 'refund') {
-    if (order.paymentStatus !== 'PAID') return res.status(400).json({ error: 'only PAID can be refunded' });
-    await creditWallet(order.userId, order.amountUsdt, `Refund order ${order.orderNo}`, order.id, adminId);
-    await prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'REFUNDED' } });
+    const refundSuccess = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.updateMany({
+        where: { id: order.id, paymentStatus: 'PAID' },
+        data: { paymentStatus: 'REFUNDED' },
+      });
+      if (updated.count === 0) return false;
+      const decAmount = new Prisma.Decimal(order.amountUsdt);
+      const user = await tx.user.update({
+        where: { telegramId: order.userId },
+        data: { walletBalance: { increment: decAmount } },
+        select: { walletBalance: true },
+      });
+      await tx.walletTransaction.create({
+        data: {
+          userId: order.userId,
+          type: 'DEPOSIT',
+          amount: decAmount,
+          balanceAfter: user.walletBalance,
+          note: `Refund order ${order.orderNo}`,
+          orderId: order.id,
+          adminId,
+        },
+      });
+      return true;
+    });
+    if (!refundSuccess) return res.status(400).json({ error: 'only PAID can be refunded or order already refunded' });
     await sendUserMessage(order.userId.toString(), `💸 Order <code>${order.orderNo}</code> refunded to wallet: $${Number(order.amountUsdt).toFixed(2)}`);
   } else if (action === 'resend') {
     const o2 = await prisma.order.findUnique({ where: { id: order.id } });

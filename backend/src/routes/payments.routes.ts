@@ -38,6 +38,12 @@ paymentsRouter.post('/manual/:orderId', requireAuth, requireRole('SUPER_ADMIN', 
   if (!order) return res.status(404).json({ error: 'not found' });
   if (order.paymentStatus !== 'PENDING') return res.status(400).json({ error: 'already decided' });
   if (approve) {
+    if (order.txid) {
+      const dup = await prisma.order.findFirst({
+        where: { txid: order.txid, paymentStatus: 'PAID', id: { not: order.id } },
+      });
+      if (dup) return res.status(400).json({ error: `TxID already credited to order ${dup.orderNo}` });
+    }
     // Manual crypto here acts as wallet top-up OR order payment: if product is wallet-topup pseudo, credit wallet; else mark paid+fulfill.
     // Spec: approve credits wallet, writes WalletTransaction + AuditLog, notifies user.
     await prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } });
@@ -77,7 +83,16 @@ paymentsRouter.post('/verify/:orderId', requireAuth, requireRole('SUPER_ADMIN', 
   }
   const m = matchDeposit(deposits, { amount: Number(order.amountUsdt), txid: order.txid ?? undefined });
   if (!m.matched) return res.json({ matched: false, reason: m.reason, checked: deposits.length });
-  await prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } });
+
+  const matchedTxid = m.deposit?.txId ?? order.txid;
+  if (matchedTxid) {
+    const dup = await prisma.order.findFirst({
+      where: { txid: matchedTxid, paymentStatus: 'PAID', id: { not: order.id } },
+    });
+    if (dup) return res.status(400).json({ matched: false, reason: `TxID ${matchedTxid} already credited to order ${dup.orderNo}` });
+  }
+
+  await prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID', txid: matchedTxid ?? undefined } });
   const { fulfillOrder } = await import('./orders.routes.js');
   await fulfillOrder(order.id);
   await creditWalletIfDeposit(order, adminId, `auto-verified: ${m.reason}`);

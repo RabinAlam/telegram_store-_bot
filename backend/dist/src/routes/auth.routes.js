@@ -5,7 +5,6 @@ const express_1 = require("express");
 const db_js_1 = require("../db.js");
 const validators_js_1 = require("../validators.js");
 const auth_js_1 = require("../auth.js");
-const otplib_1 = require("otplib");
 exports.authRouter = (0, express_1.Router)();
 exports.authRouter.post('/login', async (req, res) => {
     const p = validators_js_1.loginDto.safeParse(req.body);
@@ -18,20 +17,12 @@ exports.authRouter.post('/login', async (req, res) => {
         const ok = await (0, auth_js_1.verifyPassword)(p.data.password, admin.passwordHash);
         if (!ok)
             return res.status(401).json({ error: 'invalid credentials' });
-        if (admin.totpSecret && !(0, auth_js_1.verifyTotp)(admin.totpSecret, p.data.totp ?? '')) {
-            return res.status(401).json({ error: '2FA code required/invalid' });
-        }
         await db_js_1.prisma.admin.update({ where: { id: admin.id }, data: { lastLoginAt: new Date() } }).catch(() => null);
         await (0, auth_js_1.audit)(admin.id, 'login', 'admin', admin.id, null, { email: admin.email }, req.ip ?? '').catch(() => null);
         res.json({ accessToken: (0, auth_js_1.signAccess)(admin.id, admin.role), refreshToken: (0, auth_js_1.signRefresh)(admin.id), admin: { id: admin.id, email: admin.email, role: admin.role } });
     }
     catch {
-        // Dev fallback when Postgres is down: allow seeded SUPER_ADMIN to log in
-        if (p.data.email === 'admin@tzstore.io' && p.data.password === 'Admin@123') {
-            const id = 'dev-admin-1';
-            return res.json({ accessToken: (0, auth_js_1.signAccess)(id, 'SUPER_ADMIN'), refreshToken: (0, auth_js_1.signRefresh)(id), admin: { id, email: p.data.email, role: 'SUPER_ADMIN' } });
-        }
-        return res.status(401).json({ error: 'invalid credentials (DB offline)' });
+        return res.status(503).json({ error: 'service unavailable (database offline)' });
     }
 });
 exports.authRouter.post('/refresh', async (req, res) => {
@@ -40,8 +31,6 @@ exports.authRouter.post('/refresh', async (req, res) => {
         return res.status(400).json({ error: 'missing refresh token' });
     try {
         const p = (0, auth_js_1.verifyRefresh)(refreshToken);
-        if (p.sub === 'dev-admin-1')
-            return res.json({ accessToken: (0, auth_js_1.signAccess)('dev-admin-1', 'SUPER_ADMIN') });
         const admin = await db_js_1.prisma.admin.findUnique({ where: { id: p.sub } });
         if (!admin)
             return res.status(401).json({ error: 'invalid' });
@@ -53,8 +42,6 @@ exports.authRouter.post('/refresh', async (req, res) => {
 });
 exports.authRouter.get('/me', auth_js_1.requireAuth, async (req, res) => {
     const adminId = req.adminId;
-    if (adminId === 'dev-admin-1')
-        return res.json({ id: 'dev-admin-1', email: 'admin@tzstore.io', role: 'SUPER_ADMIN' });
     const admin = await db_js_1.prisma.admin.findUnique({ where: { id: adminId } });
     if (!admin)
         return res.status(404).json({ error: 'not found' });
@@ -70,22 +57,6 @@ exports.authRouter.post('/change-password', auth_js_1.requireAuth, async (req, r
         return res.status(401).json({ error: 'wrong password' });
     await db_js_1.prisma.admin.update({ where: { id: adminId }, data: { passwordHash: await (0, auth_js_1.hashPassword)(newPassword) } });
     await (0, auth_js_1.audit)(adminId, 'change-password', 'admin', adminId, null, null, req.ip ?? '');
-    res.json({ ok: true });
-});
-// TOTP 2FA: setup returns otpauth URL (scan in authenticator app), then confirm with a code.
-exports.authRouter.post('/2fa/setup', auth_js_1.requireAuth, async (req, res) => {
-    const adminId = req.adminId;
-    const secret = otplib_1.authenticator.generateSecret();
-    const admin = await db_js_1.prisma.admin.findUnique({ where: { id: adminId } });
-    const otpauthUrl = otplib_1.authenticator.keyuri(admin?.email ?? 'tz-admin', 'TZ Store', secret);
-    await db_js_1.prisma.admin.update({ where: { id: adminId }, data: { totpSecret: secret } });
-    await (0, auth_js_1.audit)(adminId, '2fa:setup', 'admin', adminId, null, null, req.ip ?? '');
-    res.json({ otpauthUrl });
-});
-exports.authRouter.post('/2fa/disable', auth_js_1.requireAuth, async (req, res) => {
-    const adminId = req.adminId;
-    await db_js_1.prisma.admin.update({ where: { id: adminId }, data: { totpSecret: null } });
-    await (0, auth_js_1.audit)(adminId, '2fa:disable', 'admin', adminId, null, null, req.ip ?? '');
     res.json({ ok: true });
 });
 exports.adminsRouter = (0, express_1.Router)();

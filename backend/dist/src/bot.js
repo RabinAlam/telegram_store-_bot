@@ -35,7 +35,7 @@ async function notifyAdmins(text) {
 }
 function mainMenu() {
     return new grammy_1.InlineKeyboard()
-        .text('🛍 Products', 'menu:products').text('💲 Deposit', 'menu:deposit').row()
+        .text('🛍 Category Product', 'menu:products').text('💲 Deposit', 'menu:deposit').row()
         .text('🎁 Referrals', 'menu:referrals').text('🎁 My Orders', 'menu:orders').row()
         .text('🎧 Support', 'menu:support').text('🔎 About', 'menu:about').row()
         .text('🔑 API', 'menu:api').row()
@@ -47,21 +47,24 @@ function registerBotHandlers() {
     const SUPPORT = process.env.SUPPORT_URL ?? 'https://t.me/TZStoreSupport';
     const CHANNEL = process.env.CHANNEL_URL ?? 'https://t.me/TZStoreChannel';
     const WEBAPP = process.env.WEBAPP_URL ?? 'http://localhost:3000';
+    const STORE_UID = process.env.BINANCE_UID ?? '1134278389';
     exports.bot.command('start', async (ctx) => {
         const from = ctx.from;
-        const refMatch = (ctx.match) ?? '';
+        let referredBy = null;
+        const refMatch = String(ctx.match ?? '').trim();
         if (refMatch.startsWith('ref_')) {
             const maybe = refMatch.slice(4);
-            if (/^\d+$/.test(maybe)) {
+            if (/^\d+$/.test(maybe) && maybe !== String(from.id)) {
                 const refUser = await db_js_1.prisma.user.findUnique({ where: { telegramId: BigInt(maybe) } }).catch(() => null);
-                void refUser;
+                if (refUser)
+                    referredBy = refUser.telegramId;
             }
         }
         let user = await db_js_1.prisma.user.findUnique({ where: { telegramId: BigInt(from.id) } }).catch(() => null);
         if (!user) {
             const code = `TZ${from.id}${Math.floor(Math.random() * 900 + 100)}`;
             user = await db_js_1.prisma.user.create({
-                data: { telegramId: BigInt(from.id), username: from.username, firstName: from.first_name, referralCode: code },
+                data: { telegramId: BigInt(from.id), username: from.username, firstName: from.first_name, referralCode: code, referredByUserId: referredBy },
             }).catch(() => null);
         }
         const bal = Number(user?.walletBalance ?? 0);
@@ -108,7 +111,7 @@ function registerBotHandlers() {
             await ctx.answerCallbackQuery();
             const back = new grammy_1.InlineKeyboard().text('⬅️ Back', 'menu:home');
             if (id === 'menu:deposit')
-                await ctx.editMessageText('💲 <b>Deposit:</b> open Mini App or send USDT, then submit TXID. Binance Pay auto-confirmed via webhook.', { parse_mode: 'HTML', reply_markup: back });
+                await ctx.editMessageText(`💲 <b>Deposit:</b> send USDT to Binance UID <code>${STORE_UID}</code>, then submit your Order ID / TxID here or in the Mini App. Binance Pay auto-confirmed via webhook where configured.`, { parse_mode: 'HTML', reply_markup: back });
             else if (id === 'menu:orders') {
                 const orders = await db_js_1.prisma.order.findMany({ where: { userId: BigInt(ctx.from.id) }, take: 5, orderBy: { createdAt: 'desc' } });
                 await ctx.editMessageText(`🎁 <b>My Orders</b>\n\n${orders.map((o) => `• <code>${o.orderNo}</code> $${Number(o.amountUsdt)} [${o.paymentStatus}/${o.deliveryStatus}]`).join('\n') || 'No orders yet.'}`, { parse_mode: 'HTML', reply_markup: back });

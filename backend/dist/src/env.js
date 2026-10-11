@@ -14,6 +14,10 @@ const envSchema = zod_1.z.object({
     BINANCE_PAY_API_KEY: zod_1.z.string().default(''),
     BINANCE_PAY_SECRET: zod_1.z.string().default(''),
     BINANCE_PAY_SANDBOX: zod_1.z.coerce.boolean().default(true),
+    // Personal account (no merchant needed): store UID shown to buyers + Spot API for auto-verify
+    BINANCE_UID: zod_1.z.string().default('1134278389'),
+    BINANCE_SPOT_API_KEY: zod_1.z.string().default(''),
+    BINANCE_SPOT_SECRET: zod_1.z.string().default(''),
     WEBAPP_URL: zod_1.z.string().default('http://localhost:3000'),
     API_PUBLIC_URL: zod_1.z.string().default('http://localhost:4000'),
     CORS_ORIGINS: zod_1.z.string().default('http://localhost:5173,http://localhost:3000'),

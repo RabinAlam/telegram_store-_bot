@@ -33,7 +33,8 @@ export async function api(path: string, opts: RequestInit = {}, retry = true): P
     if (next) return api(path, { ...opts, headers: { ...(opts.headers ?? {}), authorization: `Bearer ${next}` } }, false);
     localStorage.removeItem('tz_access');
     localStorage.removeItem('tz_refresh');
-    if (location.pathname !== '/login') location.href = '/login';
+    const loginPath = location.pathname.startsWith('/admin') ? '/admin/login' : '/login';
+    if (location.pathname !== loginPath) location.href = loginPath;
     throw new Error('session expired');
   }
   if (!r.ok) {

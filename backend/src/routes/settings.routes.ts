@@ -23,7 +23,10 @@ settingsRouter.put('/', requireAuth, requireRole('SUPER_ADMIN', 'MANAGER'), asyn
   if (SECRET_KEYS.has(p.data.key) && p.data.value === '••••••') return res.json({ ok: true }); // unchanged
   const before = await prisma.setting.findUnique({ where: { key: p.data.key } });
   await prisma.setting.upsert({ where: { key: p.data.key }, update: { value: p.data.value as object }, create: { key: p.data.key, value: p.data.value as object } });
-  await audit((req as never as { adminId: string }).adminId, 'setting:update', 'setting', p.data.key, before?.value, p.data.value, req.ip ?? '');
+  const isSecret = SECRET_KEYS.has(p.data.key);
+  const auditBefore = isSecret ? '••••••' : before?.value;
+  const auditAfter = isSecret ? '••••••' : p.data.value;
+  await audit((req as never as { adminId: string }).adminId, 'setting:update', 'setting', p.data.key, auditBefore, auditAfter, req.ip ?? '');
   res.json({ ok: true });
 });
 

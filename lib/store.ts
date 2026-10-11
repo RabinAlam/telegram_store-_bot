@@ -4,21 +4,59 @@ import fs from 'fs';
 import path from 'path';
 import { PRODUCTS, CATEGORIES } from './seed-data';
 import type { SeedProduct } from './seed-data';
-import { vaultDecrypt } from './vault-crypto';
+import { vaultDecrypt, vaultEncrypt } from './vault-crypto';
 const LOGO = Object.fromEntries(CATEGORIES.map((c: any) => [c.slug, (c as any).logo]));
 const withLogo = <T extends { categorySlug: string }>(p: T) => ({ ...p, logo: (LOGO as Record<string, string>)[p.categorySlug] ?? `/logos/${p.categorySlug}.svg` });
-const FILE = () => path.join(process.cwd(), process.env.TZ_DATA_STORE ?? '.data-store.json');
+const FILE = () => {
+  if (process.env.TZ_DATA_STORE) {
+    return path.isAbsolute(process.env.TZ_DATA_STORE)
+      ? process.env.TZ_DATA_STORE
+      : path.join(process.cwd(), process.env.TZ_DATA_STORE);
+  }
+  if (process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT) {
+    return '/tmp/.data-store.json';
+  }
+  return path.join(process.cwd(), '.data-store.json');
+};
 type Order = { id: string; userTg: string; productId: string; qty: number; unitPrice: number; total: number; status: string; createdAt: string; code?: string; deliveries?: Array<{ login: string; password: string }> };
 type Intent = { id: string; orderId: string; provider: string; asset: string; amount: number; address?: string; memo?: string; status: string; expiresAt: string; txHash?: string };
 export type VaultRow = { id: string; productId: string; login: string; passwordEnc: string; status: 'AVAILABLE' | 'SOLD'; orderId?: string; soldAt?: string; createdAt: string };
-type State = { orders: Order[]; intents: Intent[]; notifs: { userTg: string; productId: string }[]; stockOv: Record<string, number>; priceOv: Record<string, number>; logoOv: Record<string, string>; titleOv: Record<string, string>; descOv: Record<string, string>; contentsOv: Record<string, string>; catOv: Record<string, string>; custom: SeedProduct[]; customCats: Array<{ slug: string; name: string; emoji: string; sort: number; logo: string }>; catOrder: string[]; vault: VaultRow[]; restocks: { id: string; productId: string; qty: number; message: string; createdAt: string }[] };
+type State = { orders: Order[]; intents: Intent[]; notifs: { userTg: string; productId: string }[]; stockOv: Record<string, number>; priceOv: Record<string, number>; logoOv: Record<string, string>; titleOv: Record<string, string>; descOv: Record<string, string>; contentsOv: Record<string, string>; catOv: Record<string, string>; deletedProducts?: string[]; custom: SeedProduct[]; customCats: Array<{ slug: string; name: string; emoji: string; sort: number; logo: string }>; catOrder: string[]; vault: VaultRow[]; restocks: { id: string; productId: string; qty: number; message: string; createdAt: string }[] };
+let memState: State | null = null;
+let currentFile: string = '';
 function load(): State {
+  const f = FILE();
+  if (memState && currentFile === f) return memState;
+  currentFile = f;
   try {
-    const j = JSON.parse(fs.readFileSync(FILE(), 'utf8'));
-    return { stockOv: {}, priceOv: {}, logoOv: {}, titleOv: {}, descOv: {}, contentsOv: {}, catOv: {}, custom: [], customCats: [], catOrder: [], vault: [], ...j };
-  } catch { return { orders: [], intents: [], notifs: [], stockOv: {}, priceOv: {}, logoOv: {}, titleOv: {}, descOv: {}, contentsOv: {}, catOv: {}, custom: [], customCats: [], catOrder: [], vault: [], restocks: [{ id: 'r1', productId: 'p-gemini-18m', qty: 30, message: 'Restocked! Gemini 18 Months', createdAt: new Date().toISOString() }] }; }
+    if (!fs.existsSync(f)) {
+      const bundle = path.join(process.cwd(), '.data-store.json');
+      if (fs.existsSync(bundle)) {
+        try { fs.copyFileSync(bundle, f); } catch {}
+      }
+    }
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const state: State = { orders: [], intents: [], notifs: [], stockOv: {}, priceOv: {}, logoOv: {}, titleOv: {}, descOv: {}, contentsOv: {}, catOv: {}, deletedProducts: [], custom: [], customCats: [], catOrder: [], vault: [], restocks: [], ...j };
+    memState = state;
+    return state;
+  } catch {
+    const fallback: State = { orders: [], intents: [], notifs: [], stockOv: {}, priceOv: {}, logoOv: {}, titleOv: {}, descOv: {}, contentsOv: {}, catOv: {}, deletedProducts: [], custom: [], customCats: [], catOrder: [], vault: [], restocks: [{ id: 'r1', productId: 'p-gemini-18m', qty: 30, message: 'Restocked! Gemini 18 Months', createdAt: new Date().toISOString() }] };
+    memState = fallback;
+    return fallback;
+  }
 }
-function save(s: State) { try { fs.writeFileSync(FILE(), JSON.stringify(s)); } catch {} }
+function save(s: State) {
+  const f = FILE();
+  memState = s;
+  currentFile = f;
+  try {
+    fs.writeFileSync(f, JSON.stringify(s));
+  } catch {
+    try {
+      fs.writeFileSync('/tmp/.data-store.json', JSON.stringify(s));
+    } catch {}
+  }
+}
 function effStock(s: State, p: { id: string; stock: number }) {
   if (s.vault.some((v) => v.productId === p.id)) {
     return s.vault.filter((v) => v.productId === p.id && v.status === 'AVAILABLE').length;
@@ -33,7 +71,7 @@ function effTitle(s: State, p: { id: string; title: string }) { return s.titleOv
 function effDesc(s: State, p: { id: string; desc: string }) { return s.descOv[p.id] ?? p.desc; }
 function effContents(s: State, p: { id: string; contents: string }) { return s.contentsOv[p.id] ?? p.contents; }
 function effCat<T extends { id: string; categorySlug: string }>(s: State, p: T) { return s.catOv[p.id] ?? p.categorySlug; }
-function allSeedAndCustom(s: State): SeedProduct[] { return [...PRODUCTS, ...s.custom]; }
+function allSeedAndCustom(s: State): SeedProduct[] { return [...PRODUCTS, ...s.custom].filter((p) => !(s.deletedProducts ?? []).includes(p.id)); }
 export const store = {
   listCats: () => {
     const s = load();
@@ -159,12 +197,30 @@ export const store = {
     if (n) save(s);
     return n;
   },
-  vaultDelete: (id: string) => {
+  vaultUpdate: (id: string, patch: { login?: string; password?: string; status?: 'AVAILABLE' | 'SOLD' }) => {
     const s = load();
     const v = s.vault.find((x) => x.id === id);
     if (!v) throw new Error('not found');
-    if (v.status !== 'AVAILABLE') throw new Error('already sold — refund the order to release it');
+    if (patch.login !== undefined) v.login = patch.login.trim();
+    if (patch.password !== undefined && patch.password.trim()) v.passwordEnc = vaultEncrypt(patch.password);
+    if (patch.status !== undefined) v.status = patch.status;
+    save(s);
+    return { id: v.id, login: v.login, status: v.status };
+  },
+  vaultDelete: (id: string, force = true) => {
+    const s = load();
+    const v = s.vault.find((x) => x.id === id);
+    if (!v) throw new Error('not found');
+    if (!force && v.status !== 'AVAILABLE') throw new Error('already sold — refund the order to release it');
     s.vault = s.vault.filter((x) => x.id !== id);
+    save(s);
+  },
+  deleteProduct: (id: string) => {
+    const s = load();
+    if (!s.deletedProducts) s.deletedProducts = [];
+    if (!s.deletedProducts.includes(id)) s.deletedProducts.push(id);
+    s.custom = s.custom.filter((p) => p.id !== id);
+    s.vault = s.vault.filter((v) => v.productId !== id);
     save(s);
   },
   setOrderDeliveries: (id: string, deliveries: Array<{ login: string; password: string }>) => {

@@ -52,3 +52,17 @@ export async function POST(req: Request) {
   const created = store.addProduct(p.data);
   return NextResponse.json({ ok: true, product: created }, { status: 201 });
 }
+
+export async function DELETE(req: Request) {
+  const denied = requireAdminToken(req);
+  if (denied) return denied;
+  const j = await req.json().catch(() => ({}));
+  const p = z.object({ id: z.string().min(1) }).safeParse(j);
+  if (!p.success) return NextResponse.json({ error: p.error.flatten() }, { status: 400 });
+  try {
+    store.deleteProduct(p.data.id);
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'delete failed' }, { status: 400 });
+  }
+}

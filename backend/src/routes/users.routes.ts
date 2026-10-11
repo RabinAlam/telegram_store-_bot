@@ -42,17 +42,40 @@ usersRouter.post('/:telegramId/adjust', requireAuth, requireRole('SUPER_ADMIN', 
   if (!p.success) return res.status(400).json({ error: p.error.flatten() });
   const adminId = (req as never as { adminId: string }).adminId;
   const tid = BigInt(req.params.telegramId);
-  const user = await prisma.user.findUnique({ where: { telegramId: tid } });
-  if (!user) return res.status(404).json({ error: 'not found' });
-  const next = new Prisma.Decimal(user.walletBalance).plus(new Prisma.Decimal(p.data.delta));
-  if (next.isNegative()) return res.status(400).json({ error: 'insufficient balance' });
-  await prisma.$transaction([
-    prisma.user.update({ where: { telegramId: tid }, data: { walletBalance: next } }),
-    prisma.walletTransaction.create({ data: { userId: tid, type: 'ADMIN_ADJUST', amount: new Prisma.Decimal(p.data.delta), balanceAfter: next, note: p.data.reason, adminId } }),
-  ]);
-  await audit(adminId, 'wallet:adjust', 'user', String(tid), { balance: String(user.walletBalance) }, { balance: next.toString(), delta: p.data.delta, reason: p.data.reason }, req.ip ?? '');
-  await sendUserMessage(String(tid), `💳 Wallet adjusted: ${p.data.delta > 0 ? '+' : ''}$${p.data.delta.toFixed(2)}. Reason: ${p.data.reason}`);
-  res.json({ ok: true, balance: next.toString() });
+  const deltaDec = new Prisma.Decimal(p.data.delta);
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      const current = await tx.user.findUnique({ where: { telegramId: tid } });
+      if (!current) return null;
+      const next = new Prisma.Decimal(current.walletBalance).plus(deltaDec);
+      if (next.isNegative()) throw new Error('insufficient balance');
+      const u = await tx.user.update({
+        where: { telegramId: tid },
+        data: { walletBalance: { increment: deltaDec } },
+        select: { walletBalance: true },
+      });
+      await tx.walletTransaction.create({
+        data: {
+          userId: tid,
+          type: 'ADMIN_ADJUST',
+          amount: deltaDec,
+          balanceAfter: u.walletBalance,
+          note: p.data.reason,
+          adminId,
+        },
+      });
+      return { before: current.walletBalance, after: u.walletBalance };
+    });
+    if (!result) return res.status(404).json({ error: 'not found' });
+    await audit(adminId, 'wallet:adjust', 'user', String(tid), { balance: String(result.before) }, { balance: result.after.toString(), delta: p.data.delta, reason: p.data.reason }, req.ip ?? '');
+    await sendUserMessage(String(tid), `💳 Wallet adjusted: ${p.data.delta > 0 ? '+' : ''}$${p.data.delta.toFixed(2)}. Reason: ${p.data.reason}`);
+    res.json({ ok: true, balance: result.after.toString() });
+  } catch (err) {
+    if (err instanceof Error && err.message === 'insufficient balance') {
+      return res.status(400).json({ error: 'insufficient balance' });
+    }
+    throw err;
+  }
 });
 
 usersRouter.post('/:telegramId/ban', requireAuth, requireRole('SUPER_ADMIN', 'MANAGER'), async (req, res) => {

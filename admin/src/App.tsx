@@ -1,20 +1,21 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import Layout from './layout';
 import { useStore } from './store';
 import { get } from './api';
-import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
-import Products from './pages/Products';
-import Categories from './pages/Categories';
-import Orders from './pages/Orders';
-import Payments from './pages/Payments';
-import Users from './pages/Users';
-import Referrals from './pages/Referrals';
-import Broadcast from './pages/Broadcast';
-import Settings from './pages/Settings';
-import AdminsAudit from './pages/AdminsAudit';
+
+const Login = lazy(() => import('./pages/Login'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Products = lazy(() => import('./pages/Products'));
+const Categories = lazy(() => import('./pages/Categories'));
+const Orders = lazy(() => import('./pages/Orders'));
+const Payments = lazy(() => import('./pages/Payments'));
+const Users = lazy(() => import('./pages/Users'));
+const Referrals = lazy(() => import('./pages/Referrals'));
+const Broadcast = lazy(() => import('./pages/Broadcast'));
+const Settings = lazy(() => import('./pages/Settings'));
+const AdminsAudit = lazy(() => import('./pages/AdminsAudit'));
 
 const qc = new QueryClient();
 
@@ -39,25 +40,28 @@ function Guard({ children, roles }: { children: JSX.Element; roles?: string[] })
 }
 
 export default function App() {
+  const basename = typeof window !== 'undefined' && window.location.pathname.startsWith('/admin') ? '/admin' : '';
   return (
     <QueryClientProvider client={qc}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route element={<Guard><Layout /></Guard>}>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/products" element={<Products />} />
-            <Route path="/categories" element={<Categories />} />
-            <Route path="/orders" element={<Orders />} />
-            <Route path="/payments" element={<Payments />} />
-            <Route path="/users" element={<Users />} />
-            <Route path="/referrals" element={<Referrals />} />
-            <Route path="/broadcast" element={<Broadcast />} />
-            <Route path="/settings" element={<Guard roles={['SUPER_ADMIN', 'MANAGER']}><Settings /></Guard>} />
-            <Route path="/admins" element={<AdminsAudit />} />
-          </Route>
-          <Route path="*" element={<div className="p-8"><h1 className="text-2xl font-extrabold">404</h1><p className="text-sm">Page not found. <a href="/" className="underline">Dashboard</a></p></div>} />
-        </Routes>
+      <BrowserRouter basename={basename}>
+        <Suspense fallback={<div className="p-8 text-sm">Loading…</div>}>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route element={<Guard><Layout /></Guard>}>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/products" element={<Products />} />
+              <Route path="/categories" element={<Categories />} />
+              <Route path="/orders" element={<Orders />} />
+              <Route path="/payments" element={<Payments />} />
+              <Route path="/users" element={<Users />} />
+              <Route path="/referrals" element={<Referrals />} />
+              <Route path="/broadcast" element={<Broadcast />} />
+              <Route path="/settings" element={<Guard roles={['SUPER_ADMIN', 'MANAGER']}><Settings /></Guard>} />
+              <Route path="/admins" element={<AdminsAudit />} />
+            </Route>
+            <Route path="*" element={<div className="p-8"><h1 className="text-2xl font-extrabold">404</h1><p className="text-sm">Page not found. <a href="/" className="underline">Dashboard</a></p></div>} />
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </QueryClientProvider>
   );

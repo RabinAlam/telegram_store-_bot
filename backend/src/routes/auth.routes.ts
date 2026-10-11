@@ -17,12 +17,7 @@ authRouter.post('/login', async (req, res) => {
     await audit(admin.id, 'login', 'admin', admin.id, null, { email: admin.email }, req.ip ?? '').catch(() => null);
     res.json({ accessToken: signAccess(admin.id, admin.role), refreshToken: signRefresh(admin.id), admin: { id: admin.id, email: admin.email, role: admin.role } });
   } catch {
-    // Dev fallback when Postgres is down: allow seeded SUPER_ADMIN to log in
-    if (p.data.email === 'admin@tzstore.io' && p.data.password === 'Admin@123') {
-      const id = 'dev-admin-1';
-      return res.json({ accessToken: signAccess(id, 'SUPER_ADMIN'), refreshToken: signRefresh(id), admin: { id, email: p.data.email, role: 'SUPER_ADMIN' } });
-    }
-    return res.status(401).json({ error: 'invalid credentials (DB offline)' });
+    return res.status(503).json({ error: 'service unavailable (database offline)' });
   }
 });
 
@@ -31,7 +26,6 @@ authRouter.post('/refresh', async (req, res) => {
   if (!refreshToken) return res.status(400).json({ error: 'missing refresh token' });
   try {
     const p = verifyRefresh(refreshToken);
-    if (p.sub === 'dev-admin-1') return res.json({ accessToken: signAccess('dev-admin-1', 'SUPER_ADMIN') });
     const admin = await prisma.admin.findUnique({ where: { id: p.sub } });
     if (!admin) return res.status(401).json({ error: 'invalid' });
     res.json({ accessToken: signAccess(admin.id, admin.role) });
@@ -40,7 +34,6 @@ authRouter.post('/refresh', async (req, res) => {
 
 authRouter.get('/me', requireAuth, async (req, res) => {
   const adminId = (req as never as { adminId: string }).adminId;
-  if (adminId === 'dev-admin-1') return res.json({ id: 'dev-admin-1', email: 'admin@tzstore.io', role: 'SUPER_ADMIN' });
   const admin = await prisma.admin.findUnique({ where: { id: adminId } });
   if (!admin) return res.status(404).json({ error: 'not found' });
   res.json({ id: admin.id, email: admin.email, role: admin.role });

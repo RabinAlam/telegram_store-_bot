@@ -1,12 +1,15 @@
-// Shared-catalog link: user storefront reads categories/products from the
-// backend API (same DB the admin panel + bot use), so admin edits appear
-// instantly. Falls back to the local demo store when backend/DB is down.
-const BASE = process.env.ADMIN_API_URL ?? process.env.NEXT_PUBLIC_ADMIN_API_URL ?? 'http://localhost:4000';
+// Shared-catalog link: user storefront reads categories/products from
+// PostgreSQL (Supabase) via Prisma directly so admin edits appear instantly
+// without HTTP roundtrips. Falls back to local demo store if DB is down.
+import { db } from './db';
+
+const BASE = process.env.ADMIN_API_URL ?? process.env.NEXT_PUBLIC_ADMIN_API_URL ?? '';
 
 async function backendGet<T>(path: string): Promise<T | null> {
+  if (!BASE) return null;
   try {
     const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), 2500);
+    const t = setTimeout(() => ctl.abort(), 2000);
     const r = await fetch(`${BASE}${path}`, { signal: ctl.signal, cache: 'no-store' });
     clearTimeout(t);
     if (!r.ok) return null;
@@ -19,13 +22,6 @@ async function backendGet<T>(path: string): Promise<T | null> {
 export const slugOf = (name: string) =>
   name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-type BackendCat = { id: string; name: string; emoji: string; sortOrder: number };
-type BackendProduct = {
-  id: string; categoryId: string; name: string; description: string;
-  priceUsdt: number; deliveryMode: string; category?: { name: string };
-  stockCount?: number;
-};
-
 const LOGO_OVERRIDES: Record<string, string> = {
   'tz-vip': '/logos/tz-vip.svg',
   'muse-ai': '/logos/muse.svg',
@@ -34,48 +30,159 @@ const LOGO_OVERRIDES: Record<string, string> = {
 };
 
 export async function sharedCategories() {
-  const j = await backendGet<{ categories: BackendCat[] }>('/api/public/categories');
-  if (!j) return null;
-  return j.categories.map((c, i) => ({
-    slug: slugOf(c.name),
-    backendId: c.id,
-    name: c.name,
-    emoji: c.emoji,
-    sort: c.sortOrder ?? i,
-    logo: LOGO_OVERRIDES[slugOf(c.name)] ?? `/logos/${slugOf(c.name)}.svg`,
-  }));
+  const prisma = db();
+  if (prisma) {
+    try {
+      const cats = await prisma.category.findMany({
+        where: { isActive: true },
+        orderBy: { sortOrder: 'asc' },
+      });
+      if (cats.length > 0) {
+        return cats.map((c, i) => ({
+          slug: slugOf(c.name),
+          backendId: c.id,
+          name: c.name,
+          emoji: c.emoji,
+          sort: c.sortOrder ?? i,
+          logo: LOGO_OVERRIDES[slugOf(c.name)] ?? `/logos/${slugOf(c.name)}.svg`,
+        }));
+      }
+    } catch (e) {
+      console.warn('Prisma sharedCategories error, falling back:', e);
+    }
+  }
+
+  // Fallback to HTTP if external backend URL is configured
+  if (BASE) {
+    const j = await backendGet<{ categories: Array<{ id: string; name: string; emoji: string; sortOrder: number }> }>('/api/public/categories');
+    if (j) {
+      return j.categories.map((c, i) => ({
+        slug: slugOf(c.name),
+        backendId: c.id,
+        name: c.name,
+        emoji: c.emoji,
+        sort: c.sortOrder ?? i,
+        logo: LOGO_OVERRIDES[slugOf(c.name)] ?? `/logos/${slugOf(c.name)}.svg`,
+      }));
+    }
+  }
+
+  return null;
 }
 
 export async function sharedProductsBySlug(slug: string) {
-  const cats = await sharedCategories();
-  const cat = cats?.find((c) => c.slug === slug);
-  if (!cat) return null;
-  const j = await backendGet<{ products: BackendProduct[] }>(
-    `/api/public/products?categoryId=${encodeURIComponent(cat.backendId)}`,
-  );
-  if (!j) return null;
-  return j.products.map((p) => toLocalProduct(p, slug));
+  const prisma = db();
+  if (prisma) {
+    try {
+      const cats = await prisma.category.findMany({ where: { isActive: true } });
+      const cat = cats.find((c) => slugOf(c.name) === slug);
+      if (cat) {
+        const products = await prisma.product.findMany({
+          where: { categoryId: cat.id, isActive: true },
+          include: {
+            stock: { where: { isSold: false } },
+            category: true,
+          },
+          orderBy: { sortOrder: 'asc' },
+        });
+        return products.map((p) => {
+          const stock = p.stock.length;
+          return {
+            id: p.id,
+            categorySlug: slug,
+            title: p.name,
+            desc: p.description,
+            contents: p.description,
+            priceUsdt: Number(p.priceUsdt),
+            tiers: [] as Array<{ minQty: number; unitPrice: number }>,
+            stock,
+            status: (stock > 0 ? 'ACTIVE' : 'OOS') as 'ACTIVE' | 'OOS',
+            logo: LOGO_OVERRIDES[slug] ?? `/logos/${slug}.svg`,
+          };
+        });
+      }
+    } catch (e) {
+      console.warn('Prisma sharedProductsBySlug error:', e);
+    }
+  }
+
+  return null;
 }
 
 export async function sharedProduct(id: string) {
-  const j = await backendGet<{ product: BackendProduct }>(`/api/public/products/${encodeURIComponent(id)}`);
-  if (!j) return null;
-  const slug = slugOf(j.product.category?.name ?? '');
-  return toLocalProduct(j.product, slug);
+  const prisma = db();
+  if (prisma) {
+    try {
+      const p = await prisma.product.findUnique({
+        where: { id },
+        include: {
+          category: true,
+          stock: { where: { isSold: false } },
+        },
+      });
+      if (p) {
+        const slug = slugOf(p.category.name);
+        const stock = p.stock.length;
+        return {
+          id: p.id,
+          categorySlug: slug,
+          title: p.name,
+          desc: p.description,
+          contents: p.description,
+          priceUsdt: Number(p.priceUsdt),
+          tiers: [] as Array<{ minQty: number; unitPrice: number }>,
+          stock,
+          status: (stock > 0 ? 'ACTIVE' : 'OOS') as 'ACTIVE' | 'OOS',
+          logo: LOGO_OVERRIDES[slug] ?? `/logos/${slug}.svg`,
+        };
+      }
+    } catch (e) {
+      console.warn('Prisma sharedProduct error:', e);
+    }
+  }
+  return null;
 }
 
-function toLocalProduct(p: BackendProduct, slug: string) {
-  const stock = p.stockCount ?? 0;
-  return {
-    id: p.id,
-    categorySlug: slug,
-    title: p.name,
-    desc: p.description,
-    contents: p.description,
-    priceUsdt: Number(p.priceUsdt),
-    tiers: [] as Array<{ minQty: number; unitPrice: number }>,
-    stock,
-    status: (stock > 0 ? 'ACTIVE' : 'OOS') as 'ACTIVE' | 'OOS',
-    logo: LOGO_OVERRIDES[slug] ?? `/logos/${slug}.svg`,
-  };
+export async function syncOrderToBackend(order: { orderNo: string; userTg: string; productId: string; qty: number; amountUsdt: number }) {
+  const prisma = db();
+  if (prisma) {
+    try {
+      let tgId: bigint;
+      try {
+        tgId = BigInt(order.userTg);
+      } catch {
+        tgId = BigInt(999999999);
+      }
+      await prisma.user.upsert({
+        where: { telegramId: tgId },
+        create: {
+          telegramId: tgId,
+          referralCode: `ref_${tgId.toString().slice(-6)}`,
+          status: 'ACTIVE',
+        },
+        update: {},
+      });
+      const prod = await prisma.product.findUnique({ where: { id: order.productId } });
+      if (prod) {
+        await prisma.order.upsert({
+          where: { orderNo: order.orderNo },
+          create: {
+            orderNo: order.orderNo,
+            userId: tgId,
+            productId: order.productId,
+            qty: order.qty,
+            amountUsdt: order.amountUsdt,
+            paymentMethod: 'BINANCE_PAY',
+            paymentStatus: 'PENDING',
+            deliveryStatus: 'PENDING',
+          },
+          update: {},
+        });
+        return true;
+      }
+    } catch (e) {
+      console.warn('Prisma syncOrderToBackend error:', e);
+    }
+  }
+  return false;
 }

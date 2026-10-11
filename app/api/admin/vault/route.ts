@@ -44,14 +44,37 @@ export async function POST(req: Request) {
   return NextResponse.json({ ok: true, imported }, { status: 201 });
 }
 
+export async function PATCH(req: Request) {
+  const denied = requireAdminToken(req);
+  if (denied) return denied;
+  const j = await req.json().catch(() => ({}));
+  const p = z.object({
+    id: z.string().min(1),
+    login: z.string().max(200).optional(),
+    password: z.string().max(500).optional(),
+    status: z.enum(['AVAILABLE', 'SOLD']).optional(),
+  }).safeParse(j);
+  if (!p.success) return NextResponse.json({ error: p.error.flatten() }, { status: 400 });
+  try {
+    const item = store.vaultUpdate(p.data.id, {
+      login: p.data.login,
+      password: p.data.password,
+      status: p.data.status,
+    });
+    return NextResponse.json({ ok: true, item });
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'update failed' }, { status: 400 });
+  }
+}
+
 export async function DELETE(req: Request) {
   const denied = requireAdminToken(req);
   if (denied) return denied;
   const j = await req.json().catch(() => ({}));
-  const p = z.object({ id: z.string().min(1) }).safeParse(j);
+  const p = z.object({ id: z.string().min(1), force: z.boolean().optional() }).safeParse(j);
   if (!p.success) return NextResponse.json({ error: p.error.flatten() }, { status: 400 });
   try {
-    store.vaultDelete(p.data.id);
+    store.vaultDelete(p.data.id, p.data.force ?? true);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : 'delete failed' }, { status: 400 });

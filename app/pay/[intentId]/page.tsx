@@ -52,7 +52,7 @@ export default function Pay({ params }: { params: { intentId: string } }) {
       });
       const j = await r.json();
       if (!r.ok) { setToast(j.error ?? 'Submit failed'); haptic('error'); return; }
-      setToast(j.message ?? 'Submitted');
+      if (j.message) setToast(j.message);
       if (j.state === 'matched') { haptic('success'); router.push(`/success/${j.intent.orderId}`); return; }
       setIntent(j.intent);
     } finally { setSubmitting(false); }
@@ -68,7 +68,7 @@ export default function Pay({ params }: { params: { intentId: string } }) {
         });
         const j = await r.json();
         if (j.state === 'matched') { haptic('success'); router.push(`/success/${j.intent.orderId}`); return; }
-        setToast(j.message ?? `Status: ${j.intent?.status ?? it.status}`);
+        setToast(`Status: ${j.intent?.status ?? it.status}`);
         setIntent(j.intent ?? it);
       } else {
         setToast(`Status: ${it?.status ?? '…'}`);
@@ -85,7 +85,7 @@ export default function Pay({ params }: { params: { intentId: string } }) {
         {intent.provider === 'BINANCE' && (
           <p className="mt-2 rounded-[10px] bg-blue-50 p-2.5 text-sm">📩 Send to store UID: <b><code>{process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389'}</code></b>{' '}
             <button className="tight ml-1 text-[#4A90D9] underline" onClick={() => copy(process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389')}>Copy</button>
-            <span className="block text-xs text-gray-500">Your UID: {intent.address} (for verification)</span></p>
+          </p>
         )}
         {intent.address && intent.provider !== 'BINANCE' && <p className="mt-1 break-all text-sm">Address/UID: <b>{intent.address}</b> <button className="tight ml-2 text-[#4A90D9] underline" onClick={() => copy(intent.address)}>Copy</button></p>}
         {intent.memo && <p className="mt-1 break-all text-sm">Memo: <b>{intent.memo}</b> <button className="tight ml-2 text-[#4A90D9] underline" onClick={() => copy(intent.memo)}>Copy</button></p>}
@@ -95,7 +95,7 @@ export default function Pay({ params }: { params: { intentId: string } }) {
         <p className="mt-2 text-xs text-gray-500">⏳ Waiting for confirmation… {mm}:{ss} • polling every 3s</p>
         <p className="text-xs text-gray-500">Status: <b>{intent.status}</b>{intent.txHash ? <> · TxID: <code>{intent.txHash}</code></> : null}</p>
       </Card>
-      {(intent.status === 'PENDING' || intent.status === 'NEEDS_REVIEW') && (
+      {(intent.status === 'PENDING' || intent.status === 'NEEDS_REVIEW') && !intent.txHash && (
         <Card>
           <p className="text-sm font-bold">📝 Submit TxID / Order ID</p>
           <p className="mt-0.5 text-xs text-gray-500">After sending, paste your Binance Order ID / TxID — auto-checked instantly.</p>

@@ -39,6 +39,7 @@ const db_js_1 = require("../db.js");
 const auth_js_1 = require("../auth.js");
 const bot_js_1 = require("../bot.js");
 const orders_routes_js_1 = require("./orders.routes.js");
+const binance_spot_js_1 = require("../binance-spot.js");
 const validators_js_1 = require("../validators.js");
 exports.paymentsRouter = (0, express_1.Router)();
 exports.paymentsRouter.get('/binance', auth_js_1.requireAuth, async (req, res) => {
@@ -71,6 +72,13 @@ exports.paymentsRouter.post('/manual/:orderId', auth_js_1.requireAuth, (0, auth_
     if (order.paymentStatus !== 'PENDING')
         return res.status(400).json({ error: 'already decided' });
     if (approve) {
+        if (order.txid) {
+            const dup = await db_js_1.prisma.order.findFirst({
+                where: { txid: order.txid, paymentStatus: 'PAID', id: { not: order.id } },
+            });
+            if (dup)
+                return res.status(400).json({ error: `TxID already credited to order ${dup.orderNo}` });
+        }
         // Manual crypto here acts as wallet top-up OR order payment: if product is wallet-topup pseudo, credit wallet; else mark paid+fulfill.
         // Spec: approve credits wallet, writes WalletTransaction + AuditLog, notifies user.
         await db_js_1.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } });
@@ -87,6 +95,49 @@ exports.paymentsRouter.post('/manual/:orderId', auth_js_1.requireAuth, (0, auth_
     await (0, auth_js_1.audit)(adminId, approve ? 'deposit:approve' : 'deposit:reject', 'order', order.id, { status: 'PENDING' }, { status: approve ? 'PAID' : 'FAILED', note }, req.ip ?? '');
     await (0, bot_js_1.notifyAdmins)(`💰 Manual deposit <code>${order.orderNo}</code> ${approve ? 'approved' : 'rejected'}`);
     res.json({ ok: true });
+});
+// Auto-verify against the store's PERSONAL Binance account (Spot API).
+// No merchant account needed. Checks on-chain USDT deposits for the order amount
+// (+ TXID when the user submitted one). On match: same approve flow as manual.
+exports.paymentsRouter.post('/verify/:orderId', auth_js_1.requireAuth, (0, auth_js_1.requireRole)('SUPER_ADMIN', 'MANAGER'), async (req, res) => {
+    const adminId = req.adminId;
+    const order = await db_js_1.prisma.order.findUnique({ where: { id: req.params.orderId } });
+    if (!order)
+        return res.status(404).json({ error: 'not found' });
+    if (order.paymentStatus !== 'PENDING')
+        return res.status(400).json({ error: 'already decided' });
+    const get = async (k) => (await db_js_1.prisma.setting.findUnique({ where: { key: k } }))?.value;
+    const apiKey = (await get('binanceSpotApiKey')) ?? process.env.BINANCE_SPOT_API_KEY ?? '';
+    const secret = (await get('binanceSpotSecret')) ?? process.env.BINANCE_SPOT_SECRET ?? '';
+    if (!apiKey || !secret) {
+        return res.status(400).json({ matched: false, reason: 'Spot API keys not set — add them in Settings → Payments, or approve manually' });
+    }
+    let deposits;
+    try {
+        deposits = await (0, binance_spot_js_1.getDepositHistory)(apiKey, secret);
+    }
+    catch (e) {
+        return res.status(502).json({ matched: false, reason: `Binance API error: ${e instanceof Error ? e.message : 'unreachable'} — approve manually` });
+    }
+    const m = (0, binance_spot_js_1.matchDeposit)(deposits, { amount: Number(order.amountUsdt), txid: order.txid ?? undefined });
+    if (!m.matched)
+        return res.json({ matched: false, reason: m.reason, checked: deposits.length });
+    const matchedTxid = m.deposit?.txId ?? order.txid;
+    if (matchedTxid) {
+        const dup = await db_js_1.prisma.order.findFirst({
+            where: { txid: matchedTxid, paymentStatus: 'PAID', id: { not: order.id } },
+        });
+        if (dup)
+            return res.status(400).json({ matched: false, reason: `TxID ${matchedTxid} already credited to order ${dup.orderNo}` });
+    }
+    await db_js_1.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID', txid: matchedTxid ?? undefined } });
+    const { fulfillOrder } = await Promise.resolve().then(() => __importStar(require('./orders.routes.js')));
+    await fulfillOrder(order.id);
+    await creditWalletIfDeposit(order, adminId, `auto-verified: ${m.reason}`);
+    await (0, bot_js_1.sendUserMessage)(order.userId.toString(), `✅ Deposit <code>${order.orderNo}</code> auto-verified on Binance (${m.reason}). Thank you!`);
+    await (0, auth_js_1.audit)(adminId, 'deposit:auto-verify', 'order', order.id, { status: 'PENDING' }, { status: 'PAID', match: m.reason }, req.ip ?? '');
+    await (0, bot_js_1.notifyAdmins)(`🤖 Auto-verified <code>${order.orderNo}</code> $${Number(order.amountUsdt)} (${m.reason})`);
+    res.json({ matched: true, reason: m.reason });
 });
 async function creditWalletIfDeposit(order, adminId, note) {
     // For pure wallet top-up orders (product name starts with "Wallet"), also credit wallet.

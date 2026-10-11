@@ -25,6 +25,9 @@ async function targets(segment) {
     const rows = await db_js_1.prisma.user.findMany({ where: { status: 'ACTIVE' }, select: { telegramId: true } });
     return rows.map((r) => r.telegramId);
 }
+function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 async function processBroadcast(broadcastId, segment = 'all') {
     const b = await db_js_1.prisma.broadcast.findUnique({ where: { id: broadcastId } });
     if (!b)
@@ -32,10 +35,11 @@ async function processBroadcast(broadcastId, segment = 'all') {
     await db_js_1.prisma.broadcast.update({ where: { id: broadcastId }, data: { status: 'SENDING', sentCount: 0 } });
     const ids = await targets(segment).catch(() => []);
     let sent = 0;
+    const messageText = `<b>${escapeHtml(b.title)}</b>\n\n${escapeHtml(b.text)}`;
     for (const id of ids) {
         try {
             if (bot_js_1.bot)
-                await bot_js_1.bot.api.sendMessage(String(id), `<b>${b.title}</b>\n\n${b.text}`, { parse_mode: 'HTML' });
+                await bot_js_1.bot.api.sendMessage(String(id), messageText, { parse_mode: 'HTML' });
             sent += 1;
         }
         catch (e) {

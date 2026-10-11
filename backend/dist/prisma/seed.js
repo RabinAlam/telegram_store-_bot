@@ -23,7 +23,8 @@ async function main() {
     });
     const defaults = {
         referralPercent: 5, supportUrl: 'https://t.me/TZStoreSupport', channelUrl: 'https://t.me/TZStoreChannel',
-        minDeposit: 1, manualAddresses: { TRC20: '', BEP20: '' }, botToken: '', binanceMerchantId: '', binanceApiKey: '', binanceSecret: '',
+        minDeposit: 1, manualAddresses: { TRC20: '', BEP20: '' }, botToken: '', binanceUid: '1134278389',
+        binanceSpotApiKey: '', binanceSpotSecret: '', binanceMerchantId: '', binanceApiKey: '', binanceSecret: '',
     };
     for (const [key, value] of Object.entries(defaults)) {
         await prisma.setting.upsert({ where: { key }, update: {}, create: { key, value: value } });

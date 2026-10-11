@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { quote } from '@/lib/pricing';
 import { store } from '@/lib/store';
 import { sessionFromRequest } from '@/lib/auth';
+import { requireAdminToken } from '@/lib/admin-auth';
 import { newId } from '@/lib/payments';
 const hits = new Map<string, { n: number; t: number }>();
 const WINDOW_MS = 60_000;
@@ -40,6 +41,8 @@ export async function POST(req: Request) {
       q = { productId: sp.id, qty: p.data.qty, unitPrice: sp.priceUsdt, total: Math.round(sp.priceUsdt * p.data.qty * 100) / 100 };
     }
     const order = store.createOrder({ id: newId('ord'), userTg: s?.tgId ?? 'dev-user', productId: q.productId, qty: q.qty, unitPrice: q.unitPrice, total: q.total, status: 'PENDING', createdAt: new Date().toISOString() });
+    const { syncOrderToBackend } = await import('@/lib/admin-api');
+    void syncOrderToBackend({ orderNo: order.id, userTg: order.userTg, productId: order.productId, qty: order.qty, amountUsdt: order.total }).catch(() => null);
     return NextResponse.json({ order });
   } catch (e: any) { return NextResponse.json({ error: e.message }, { status: 400 }); }
 }
@@ -48,7 +51,20 @@ export async function GET(req: Request) {
   if (!id) return NextResponse.json({ error: 'missing id' }, { status: 400 });
   const o = store.getOrder(id);
   if (!o) return NextResponse.json({ error: 'not found' }, { status: 404 });
-  // Testing mode: order details (incl. delivery when present) open to everyone.
+
+  const session = sessionFromRequest(req);
+  const isAdmin = requireAdminToken(req) === null || session?.role === 'ADMIN';
+  const isOwner = session && session.tgId === o.userTg;
+
+  // Protect sensitive order info: require valid owner session or admin credentials
+  if (!isOwner && !isAdmin) {
+    if (session && session.tgId !== o.userTg) {
+      return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+    }
+    if (process.env.NODE_ENV === 'production' || o.userTg !== 'dev-user') {
+      return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+    }
+  }
   let prod: any = null;
   try { prod = store.getProduct(o.productId); } catch { prod = null; }
   if (!prod) {

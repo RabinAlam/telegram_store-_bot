@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.paginationDto = exports.settingDto = exports.broadcastDto = exports.depositDecisionDto = exports.orderActionDto = exports.adjustDto = exports.stockImportDto = exports.productDto = exports.categoryDto = exports.createAdminDto = exports.loginDto = void 0;
 const zod_1 = require("zod");
-exports.loginDto = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(1), totp: zod_1.z.string().optional() });
+exports.loginDto = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(1) });
 exports.createAdminDto = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(8), role: zod_1.z.enum(['SUPER_ADMIN', 'MANAGER', 'SUPPORT']) });
 exports.categoryDto = zod_1.z.object({ name: zod_1.z.string().min(1), emoji: zod_1.z.string().default('📦'), sortOrder: zod_1.z.number().int().default(0), isActive: zod_1.z.boolean().default(true) });
 exports.productDto = zod_1.z.object({

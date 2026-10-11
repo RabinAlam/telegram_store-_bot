@@ -2,8 +2,8 @@ import { useMemo, useRef, useState, Fragment } from 'react';
 import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Pencil, Package, Plus, ImagePlus, X, KeyRound, Eye, EyeOff, Trash2, Copy, Upload } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useReactTable, getCoreRowModel, getPaginationRowModel, flexRender, createColumnHelper } from '@tanstack/react-table';
-import { tzGetProducts, tzGetCategories, tzCreateProduct, tzCreateCategory, tzUpdateProduct, tzUploadPhoto, tzLogoUrl, tzVaultList, tzVaultAdd, tzVaultImport, tzVaultDelete, type TzProduct, type VaultRow } from '../tzstore';
-import { Badge, Button, Card, Modal, Empty, Field, Input, Select, Skeleton, Textarea, toast } from '../ui';
+import { tzGetProducts, tzGetCategories, tzCreateProduct, tzCreateCategory, tzUpdateProduct, tzDeleteProduct, tzUploadPhoto, tzLogoUrl, tzVaultList, tzVaultAdd, tzVaultImport, tzVaultDelete, tzVaultUpdate, type TzProduct, type VaultRow } from '../tzstore';
+import { Badge, Button, Card, Modal, Confirm, Empty, Field, Input, Select, Skeleton, Textarea, toast } from '../ui';
 
 const col = createColumnHelper<TzProduct & { categoryName: string }>();
 
@@ -43,7 +43,6 @@ function VaultSection({ productId, stock, onChanged }: { productId: string; stoc
   }
 
   async function remove(id: string) {
-    if (!confirm('Delete this account?')) return;
     try { await tzVaultDelete(id); toast('Deleted'); await refresh(); }
     catch (e) { toast(e instanceof Error ? e.message : 'delete failed'); }
   }
@@ -96,6 +95,13 @@ function DeliveryReadyTable({ product, onCollapse, onChanged }: { product: TzPro
   const [bulk, setBulk] = useState('');
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  const [editingRow, setEditingRow] = useState<VaultRow | null>(null);
+  const [editLogin, setEditLogin] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editStatus, setEditStatus] = useState<'AVAILABLE' | 'SOLD'>('AVAILABLE');
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   const vault = useQuery({ queryKey: ['tz-vault', product.id], queryFn: () => tzVaultList(product.id) });
   const rows = (vault.data?.rows ?? []) as VaultRow[];
   const available = rows.filter((r) => r.status === 'AVAILABLE').length;
@@ -132,10 +138,37 @@ function DeliveryReadyTable({ product, onCollapse, onChanged }: { product: TzPro
     finally { setBusy(false); }
   }
 
-  async function remove(id: string) {
-    if (!confirm('Delete this delivery item?')) return;
-    try { await tzVaultDelete(id); toast('Deleted'); await refresh(); }
-    catch (e) { toast(e instanceof Error ? e.message : 'delete failed'); }
+  function startEdit(r: VaultRow) {
+    setEditingRow(r);
+    setEditLogin(r.login);
+    setEditPassword(r.password);
+    setEditStatus(r.status);
+  }
+
+  async function saveEdit() {
+    if (!editingRow) return;
+    if (!editLogin.trim() || !editPassword) { toast('Login and password required'); return; }
+    setSavingEdit(true);
+    try {
+      await tzVaultUpdate(editingRow.id, { login: editLogin.trim(), password: editPassword, status: editStatus });
+      toast('Delivery item updated');
+      setEditingRow(null);
+      await refresh();
+    } catch (e) { toast(e instanceof Error ? e.message : 'update failed'); }
+    finally { setSavingEdit(false); }
+  }
+
+  async function doDelete() {
+    if (!deletingId) return;
+    try {
+      await tzVaultDelete(deletingId);
+      toast('Delivery item deleted');
+      await refresh();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'delete failed');
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   const shortDate = (iso: string | null) => {
@@ -181,10 +214,9 @@ function DeliveryReadyTable({ product, onCollapse, onChanged }: { product: TzPro
                 <td className="p-2.5 font-mono text-xs text-slate-500">{r.orderId ? `#${r.orderId.slice(-8).toUpperCase()}` : '#—'} · {shortDate(r.soldAt)}</td>
                 <td className="p-2.5">
                   <span className="flex justify-end gap-1.5">
-                    <button onClick={() => copy(`${r.login} | ${r.password}`, 'Login + password copied')} className="rounded-md border border-slate-200 p-1.5 text-slate-500 hover:text-slate-700 dark:border-slate-700" aria-label="Copy row"><Copy size={13} /></button>
-                    {r.status === 'AVAILABLE' && (
-                      <button onClick={() => remove(r.id)} className="rounded-md border border-slate-200 p-1.5 text-red-500 hover:bg-red-50 dark:border-slate-700" aria-label="Delete"><Trash2 size={13} /></button>
-                    )}
+                    <button onClick={() => startEdit(r)} className="rounded-md border border-slate-200 p-1.5 text-blue-600 hover:bg-blue-50 dark:border-slate-700" aria-label="Edit" title="Edit delivery item"><Pencil size={13} /></button>
+                    <button onClick={() => copy(`${r.login} | ${r.password}`, 'Login + password copied')} className="rounded-md border border-slate-200 p-1.5 text-slate-500 hover:text-slate-700 dark:border-slate-700" aria-label="Copy row" title="Copy row"><Copy size={13} /></button>
+                    <button onClick={() => setDeletingId(r.id)} className="rounded-md border border-slate-200 p-1.5 text-red-500 hover:bg-red-50 dark:border-slate-700" aria-label="Delete" title="Delete delivery item"><Trash2 size={13} /></button>
                   </span>
                 </td>
               </tr>
@@ -209,6 +241,32 @@ function DeliveryReadyTable({ product, onCollapse, onChanged }: { product: TzPro
           </div>
         </div>
       </div>
+
+      <Modal open={!!editingRow} onClose={() => setEditingRow(null)} title="Edit delivery item">
+        {editingRow && (
+          <div className="space-y-3">
+            <Field label="Login (email / username)"><Input value={editLogin} onChange={(e) => setEditLogin(e.target.value)} placeholder="Login" /></Field>
+            <Field label="Password"><Input value={editPassword} onChange={(e) => setEditPassword(e.target.value)} placeholder="Password" /></Field>
+            <Field label="Status">
+              <Select value={editStatus} onChange={(e) => setEditStatus(e.target.value as 'AVAILABLE' | 'SOLD')} className="w-full">
+                <option value="AVAILABLE">AVAILABLE</option>
+                <option value="SOLD">SOLD</option>
+              </Select>
+            </Field>
+            <div className="mt-4 flex gap-2">
+              <Button variant="green" onClick={saveEdit} disabled={savingEdit} className="flex-1">{savingEdit ? 'Saving…' : 'Save changes'}</Button>
+              <Button variant="outline" onClick={() => setEditingRow(null)} className="flex-1">Cancel</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      <Confirm
+        open={!!deletingId}
+        text="Delete this delivery item?"
+        onYes={doDelete}
+        onNo={() => setDeletingId(null)}
+      />
     </div>
   );
 }
@@ -219,6 +277,7 @@ export default function Products() {
   const [cat, setCat] = useState('');
   const [editing, setEditing] = useState<TzProduct | null>(null);
   const [creating, setCreating] = useState(false);
+  const [deletingProduct, setDeletingProduct] = useState(false);
   // edit-form fields (TZ Store live data)
   const [eTitle, setETitle] = useState('');
   const [eCat, setECat] = useState('');
@@ -324,6 +383,19 @@ export default function Products() {
       toast('Saved to TZ Store'); setEditing(null); list.refetch();
     } catch (e) { setEditError(e instanceof Error ? e.message : 'save failed'); }
     finally { setESaving(false); }
+  }
+
+  async function deleteCurrentProduct() {
+    if (!editing) return;
+    try {
+      await tzDeleteProduct(editing.id);
+      toast('Product deleted');
+      setEditing(null);
+      setDeletingProduct(false);
+      list.refetch();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'delete failed');
+    }
   }
 
 
@@ -481,12 +553,21 @@ export default function Products() {
             </div>
             <Field label="Description"><Textarea rows={3} value={eDesc} onChange={(e) => setEDesc(e.target.value)} /></Field>
             {editError && <p className="rounded-xl bg-red-50 p-2.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-300">{editError}</p>}
-            <Button onClick={saveEdit} disabled={eSaving || eUploading} className="w-full">{eSaving ? 'Saving…' : 'Save to TZ Store'}</Button>
+            <div className="flex gap-2">
+              <Button onClick={saveEdit} disabled={eSaving || eUploading} className="flex-1">{eSaving ? 'Saving…' : 'Save to TZ Store'}</Button>
+              <Button variant="danger" onClick={() => setDeletingProduct(true)} className="shrink-0"><span className="flex items-center gap-1"><Trash2 size={14} /> Delete</span></Button>
+            </div>
             <hr className="dark:border-slate-800" />
             {editing && <VaultSection productId={editing.id} stock={editing.stock} onChanged={() => list.refetch()} />}
           </div>
         )}
       </Modal>
+      <Confirm
+        open={deletingProduct}
+        text={`Are you sure you want to delete product "${editing?.title}"?`}
+        onYes={deleteCurrentProduct}
+        onNo={() => setDeletingProduct(false)}
+      />
       <Modal open={creating} onClose={() => setCreating(false)} title="New product — TZ Store">
         <div className="space-y-3">
           <div className="flex items-center gap-3">

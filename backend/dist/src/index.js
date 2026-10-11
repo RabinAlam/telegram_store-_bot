@@ -37,6 +37,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 require("dotenv/config");
+require("express-async-errors");
 const express_1 = __importDefault(require("express"));
 const helmet_1 = __importDefault(require("helmet"));
 const cors_1 = __importDefault(require("cors"));
@@ -59,6 +60,7 @@ const broadcast_routes_js_1 = require("./routes/broadcast.routes.js");
 const settings_routes_js_1 = require("./routes/settings.routes.js");
 const audit_routes_js_1 = require("./routes/audit.routes.js");
 const webhooks_routes_js_1 = require("./routes/webhooks.routes.js");
+const public_routes_js_1 = require("./routes/public.routes.js");
 const app = (0, express_1.default)();
 app.set('trust proxy', 1);
 app.use((0, helmet_1.default)());
@@ -82,6 +84,7 @@ app.use('/api/broadcasts', broadcast_routes_js_1.broadcastRouter);
 app.use('/api/settings', settings_routes_js_1.settingsRouter);
 app.use('/api/audit', audit_routes_js_1.auditRouter);
 app.use('/webhooks', webhooks_routes_js_1.webhooksRouter);
+app.use('/api/public', public_routes_js_1.publicRouter);
 try {
     const p1 = node_path_1.default.join(process.cwd(), 'src/openapi.yaml');
     const p2 = node_path_1.default.join(process.cwd(), 'dist/openapi.yaml');
@@ -100,6 +103,9 @@ app.use((err, _req, res, _next) => {
 });
 const port = Number(process.env.PORT ?? 4000);
 (0, bot_js_1.registerBotHandlers)();
+// Never let a DB blip take the whole API down (Express 4 has no async guard)
+process.on('unhandledRejection', (e) => logger_js_1.logger.error({ e }, 'unhandled rejection (kept alive)'));
+process.on('uncaughtException', (e) => logger_js_1.logger.error({ e }, 'uncaught exception (kept alive)'));
 // Broadcast queue worker (best-effort: skipped when Redis is unreachable)
 void (async () => {
     try {

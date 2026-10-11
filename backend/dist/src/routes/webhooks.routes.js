@@ -16,6 +16,12 @@ exports.webhooksRouter = (0, express_1.Router)();
 exports.webhooksRouter.post('/telegram', async (req, res) => {
     if (!bot_js_1.bot)
         return res.status(500).json({ error: 'bot not configured' });
+    const secretToken = process.env.TELEGRAM_WEBHOOK_SECRET;
+    if (secretToken) {
+        const received = req.headers['x-telegram-bot-api-secret-token'];
+        if (received !== secretToken)
+            return res.status(401).json({ error: 'unauthorized webhook' });
+    }
     try {
         await bot_js_1.bot.handleUpdate(req.body);
         res.json({ ok: true });
@@ -59,7 +65,7 @@ exports.webhooksRouter.post('/binance-pay', async (req, res) => {
         update: { bizOrderId, status: isPaid ? 'PAID' : bizStatus, rawWebhook: payload, verifiedAt: verified ? new Date() : undefined },
         create: { merchantOrderNo, bizOrderId, amount: 0, currency: 'USDT', status: isPaid ? 'PAID' : bizStatus, rawWebhook: payload, verifiedAt: verified ? new Date() : undefined },
     });
-    if (isPaid && (verified || !hasSecret)) {
+    if (isPaid && (verified || (!hasSecret && process.env.NODE_ENV !== 'production'))) {
         const order = await db_js_1.prisma.order.findFirst({ where: { binancePayOrderNo: merchantOrderNo } });
         if (order && order.paymentStatus !== 'PAID') {
             await db_js_1.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'PAID' } });
@@ -72,9 +78,13 @@ exports.webhooksRouter.post('/binance-pay', async (req, res) => {
 // Create Binance Pay order for an existing PENDING order
 exports.webhooksRouter.post('/binance-pay/create', async (req, res) => {
     const { orderNo } = req.body;
+    if (!orderNo || typeof orderNo !== 'string')
+        return res.status(400).json({ error: 'valid orderNo required' });
     const order = await db_js_1.prisma.order.findUnique({ where: { orderNo } });
     if (!order)
         return res.status(404).json({ error: 'order not found' });
+    if (order.paymentStatus !== 'PENDING')
+        return res.status(400).json({ error: 'order is not in payable status' });
     const merchantOrderNo = order.binancePayOrderNo ?? `TZ-${order.orderNo}-${node_crypto_1.default.randomBytes(3).toString('hex')}`;
     const r = await (0, binance_js_1.createBinanceOrder)({ merchantOrderNo, amount: String(order.amountUsdt), goodsName: `TZ Store ${order.orderNo}` });
     await db_js_1.prisma.order.update({ where: { id: order.id }, data: { binancePayOrderNo: merchantOrderNo } });

@@ -34,3 +34,46 @@ publicRouter.get('/products/:id', async (req, res) => {
   const stockCount = await prisma.stockItem.count({ where: { productId: p.id, isSold: false } });
   res.json({ product: { ...p, priceUsdt: Number(p.priceUsdt), stockCount } });
 });
+
+publicRouter.post('/orders', async (req, res) => {
+  const { orderNo, userTelegramId, productId, qty, paymentMethod = 'BINANCE_PAY' } = req.body as {
+    orderNo: string;
+    userTelegramId: string;
+    productId: string;
+    qty: number;
+    amountUsdt?: number;
+    paymentMethod?: 'BINANCE_PAY' | 'WALLET' | 'MANUAL_CRYPTO';
+  };
+  const quantity = Math.max(1, Math.floor(Number(qty) || 1));
+  if (!orderNo || !productId) return res.status(400).json({ error: 'missing required fields' });
+  try {
+    const product = await prisma.product.findUnique({ where: { id: productId } });
+    if (!product || !product.isActive) return res.status(404).json({ error: 'product not available' });
+
+    // Server-side authoritative price calculation (anti-tampering)
+    const totalAmount = Math.round(Number(product.priceUsdt) * quantity * 100) / 100;
+
+    const tgId = BigInt(userTelegramId && /^\d+$/.test(userTelegramId) ? userTelegramId : 0);
+    const effectiveUserId = tgId > 0n ? tgId : 9999999999n;
+    await prisma.user.upsert({
+      where: { telegramId: effectiveUserId },
+      update: {},
+      create: { telegramId: effectiveUserId, referralCode: `TZ${effectiveUserId}${Math.floor(Math.random() * 900 + 100)}` },
+    }).catch(() => null);
+
+    const order = await prisma.order.create({
+      data: {
+        orderNo,
+        userId: effectiveUserId,
+        productId,
+        qty: quantity,
+        amountUsdt: totalAmount,
+        paymentMethod: paymentMethod as never,
+        paymentStatus: 'PENDING',
+      },
+    });
+    res.status(201).json({ ok: true, orderId: order.id, orderNo: order.orderNo, amountUsdt: totalAmount });
+  } catch (e) {
+    res.status(400).json({ error: e instanceof Error ? e.message : 'failed to create order' });
+  }
+});

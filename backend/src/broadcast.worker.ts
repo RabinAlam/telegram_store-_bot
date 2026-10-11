@@ -24,15 +24,20 @@ async function targets(segment: string): Promise<bigint[]> {
   return rows.map((r) => r.telegramId);
 }
 
+function escapeHtml(s: string) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 export async function processBroadcast(broadcastId: string, segment = 'all') {
   const b = await prisma.broadcast.findUnique({ where: { id: broadcastId } });
   if (!b) return;
   await prisma.broadcast.update({ where: { id: broadcastId }, data: { status: 'SENDING', sentCount: 0 } });
   const ids = await targets(segment).catch(() => [] as bigint[]);
   let sent = 0;
+  const messageText = `<b>${escapeHtml(b.title)}</b>\n\n${escapeHtml(b.text)}`;
   for (const id of ids) {
     try {
-      if (bot) await bot.api.sendMessage(String(id), `<b>${b.title}</b>\n\n${b.text}`, { parse_mode: 'HTML' });
+      if (bot) await bot.api.sendMessage(String(id), messageText, { parse_mode: 'HTML' });
       sent += 1;
     } catch (e) {
       logger.warn({ e, id: String(id) }, 'broadcast send failed');

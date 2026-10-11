@@ -15,6 +15,16 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   if (!it) return NextResponse.json({ error: 'not found' }, { status: 404 });
   if (it.status === 'CONFIRMED' || it.status === 'FULFILLED') return NextResponse.json({ ok: true, state: 'already', intent: it });
   if (it.status === 'CANCELLED' || it.status === 'EXPIRED') return NextResponse.json({ error: 'deposit expired — create a new one' }, { status: 400 });
+
+  // Enforce uniqueness to prevent TxID replay / double spending
+  const normalizedTxid = p.data.txid.toLowerCase();
+  const txidReused = store.allIntents().some(
+    (x) => x.id !== it.id && x.txHash?.toLowerCase() === normalizedTxid && (x.status === 'CONFIRMED' || x.status === 'FULFILLED'),
+  );
+  if (txidReused) {
+    return NextResponse.json({ error: 'This TxID / Order ID has already been credited to another order' }, { status: 400 });
+  }
+
   store.setIntent(it.id, { txHash: p.data.txid });
   const check = await checkTxidOnBinance(p.data.txid, it.amount);
   if (check.state === 'matched') {
@@ -27,5 +37,8 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     store.setIntent(it.id, { status: 'NEEDS_REVIEW' });
     store.setOrderStatus(it.orderId, 'NEEDS_REVIEW');
   }
-  return NextResponse.json({ ok: true, state: check.state, message: check.state === 'no-keys' ? `📝 TxID saved. ${check.reason}` : `🔍 ${check.reason}`, intent: store.getIntent(it.id) });
+  if (check.state === 'no-keys') {
+    return NextResponse.json({ ok: true, state: 'no-keys', intent: store.getIntent(it.id) });
+  }
+  return NextResponse.json({ ok: true, state: check.state, message: `🔍 ${check.reason}`, intent: store.getIntent(it.id) });
 }

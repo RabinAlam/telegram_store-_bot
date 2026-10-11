@@ -12,10 +12,8 @@ exports.verifyRefresh = verifyRefresh;
 exports.requireAuth = requireAuth;
 exports.requireRole = requireRole;
 exports.audit = audit;
-exports.verifyTotp = verifyTotp;
 const bcryptjs_1 = __importDefault(require("bcryptjs"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const otplib_1 = require("otplib");
 const db_js_1 = require("./db.js");
 const ACCESS_TTL = '15m';
 const REFRESH_TTL = '7d';
@@ -28,10 +26,16 @@ function signRefresh(adminId) {
     return jsonwebtoken_1.default.sign({ sub: adminId, typ: 'refresh' }, process.env.JWT_REFRESH_SECRET, { expiresIn: REFRESH_TTL });
 }
 function verifyAccess(token) {
-    return jsonwebtoken_1.default.verify(token, process.env.JWT_ACCESS_SECRET);
+    const p = jsonwebtoken_1.default.verify(token, process.env.JWT_ACCESS_SECRET);
+    if (p.typ && p.typ !== 'access')
+        throw new Error('invalid token type');
+    return p;
 }
 function verifyRefresh(token) {
-    return jsonwebtoken_1.default.verify(token, process.env.JWT_REFRESH_SECRET);
+    const p = jsonwebtoken_1.default.verify(token, process.env.JWT_REFRESH_SECRET);
+    if (p.typ && p.typ !== 'refresh')
+        throw new Error('invalid token type');
+    return p;
 }
 function requireAuth(req, res, next) {
     const h = req.headers.authorization;
@@ -56,7 +60,4 @@ function requireRole(...roles) {
 }
 async function audit(adminId, action, entity, entityId, before, after, ip) {
     await db_js_1.prisma.auditLog.create({ data: { adminId, action, entity, entityId, before: (before ?? {}), after: (after ?? {}), ip } });
-}
-function verifyTotp(secret, token) {
-    return otplib_1.authenticator.check(token, secret);
 }

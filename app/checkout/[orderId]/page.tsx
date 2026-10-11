@@ -16,7 +16,7 @@ type Method = {
 
 const METHODS: Method[] = [
   { id: 'STARS', label: 'Telegram Stars', hint: 'Recommended • instant', icon: '/logos/pay-stars.svg', badge: 'Auto' },
-  { id: 'BINANCE', label: 'Binance Pay', hint: 'UID transfer • manual review', icon: '/logos/pay-binance.svg' },
+  { id: 'BINANCE', label: 'Binance Pay', hint: 'UID transfer • instant', icon: '/logos/pay-binance.svg' },
   { id: 'TRC20', label: 'USDT · TRC20', hint: 'Low fee • ~1 min', icon: '/logos/pay-tether.svg', badge: 'Auto' },
   { id: 'BEP20', label: 'USDT · BEP20', hint: 'Low fee • ~1 min', icon: '/logos/pay-tether.svg', badge: 'Auto' },
   { id: 'BTC', label: 'Bitcoin', hint: 'On-chain • ~10 min', icon: '/logos/pay-bitcoin.svg', badge: 'Auto' },
@@ -30,7 +30,6 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
   const [toast, setToast] = useState<string | null>(null);
   const [paying, setPaying] = useState<string | null>(null);
   const [binanceOpen, setBinanceOpen] = useState(false);
-  const [uid, setUid] = useState('');
 
   useEffect(() => backButton(() => router.back()), [router]);
   const { data, isLoading } = useQuery({
@@ -40,20 +39,15 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
   const order = data?.order;
   const product = data?.product;
 
-  async function pay(provider: string, binanceUid?: string) {
+  async function pay(provider: string) {
     if (paying) return;
-    if (provider === 'BINANCE' && !binanceUid?.trim()) {
-      setToast('Enter your Binance UID first');
-      haptic('warning');
-      return;
-    }
     setPaying(provider);
     haptic('light');
     try {
       const r = await fetch('/api/payments/intent', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...tzAuthHeader() },
-        body: JSON.stringify({ orderId: params.orderId, provider, binanceUid }),
+        body: JSON.stringify({ orderId: params.orderId, provider }),
       });
       const j = await r.json();
       if (!r.ok) {
@@ -181,24 +175,10 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
                         Copy
                       </button>
                     </p>
-                    <label
-                      htmlFor="binance-uid"
-                      className="mt-2 block text-xs font-semibold text-gray-700"
-                    >
-                      Your Binance UID
-                    </label>
-                    <input
-                      id="binance-uid"
-                      value={uid}
-                      onChange={(e) => setUid(e.target.value.replace(/\D/g, ''))}
-                      inputMode="numeric"
-                      placeholder="e.g. 123456789"
-                      className="mt-1.5 w-full rounded-[12px] border border-gray-200 bg-white px-4 py-3 text-[15px] tabular-nums outline-none focus:border-[#4A90D9]"
-                    />
                     <button
-                      onClick={() => pay('BINANCE', uid)}
-                      disabled={paying !== null || !uid.trim()}
-                      className="mt-2 w-full rounded-[12px] bg-[#4A90D9] px-4 py-3 text-sm font-bold text-white transition tg-press disabled:opacity-50"
+                      onClick={() => pay('BINANCE')}
+                      disabled={paying !== null}
+                      className="mt-2.5 w-full rounded-[12px] bg-[#4A90D9] px-4 py-3 text-sm font-bold text-white transition tg-press disabled:opacity-50"
                     >
                       {paying === 'BINANCE' ? 'Creating…' : `Confirm • ${money(order.total)}`}
                     </button>

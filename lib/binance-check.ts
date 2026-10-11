@@ -13,6 +13,7 @@ export async function checkTxidOnBinance(
   const secret = process.env.BINANCE_SPOT_SECRET ?? '';
   if (!key || !secret) return { state: 'no-keys', reason: 'Auto-check not configured — admin will verify manually.' };
   const needle = txid.trim().toLowerCase();
+  if (needle.length < 8) return { state: 'not-found', checked: 0, reason: 'TxID too short — must be at least 8 characters.' };
   try {
     const qs = new URLSearchParams({ coin: 'USDT', limit: '100', timestamp: String(Date.now()), recvWindow: '10000' }).toString();
     const sig = crypto.createHmac('sha256', secret).update(qs).digest('hex');
@@ -22,7 +23,7 @@ export async function checkTxidOnBinance(
     if (!r.ok) return { state: 'not-found', checked: 0, reason: 'Binance API unreachable — try Check Status in a minute.' };
     const list = (await r.json()) as Array<{ amount: string; txId?: string; status?: number }>;
     const ok = (Array.isArray(list) ? list : []).filter((d) => d.status === undefined || d.status === 1);
-    const hit = ok.find((d) => d.txId && (d.txId.toLowerCase().includes(needle) || needle.includes(d.txId.toLowerCase())));
+    const hit = ok.find((d) => d.txId && d.txId.toLowerCase().trim() === needle);
     if (!hit) return { state: 'not-found', checked: ok.length, reason: `TxID not in recent deposits (checked ${ok.length}) — if just sent, wait a minute and retry.` };
     const amount = Number(hit.amount);
     if (expectedAmount !== undefined && Math.abs(amount - expectedAmount) > 0.011) {

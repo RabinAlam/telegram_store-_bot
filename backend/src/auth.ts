@@ -16,10 +16,14 @@ export function signRefresh(adminId: string) {
   return jwt.sign({ sub: adminId, typ: 'refresh' }, process.env.JWT_REFRESH_SECRET!, { expiresIn: REFRESH_TTL });
 }
 export function verifyAccess(token: string) {
-  return jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as { sub: string; role: string };
+  const p = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as { sub: string; role: string; typ?: string };
+  if (p.typ && p.typ !== 'access') throw new Error('invalid token type');
+  return p;
 }
 export function verifyRefresh(token: string) {
-  return jwt.verify(token, process.env.JWT_REFRESH_SECRET!) as { sub: string };
+  const p = jwt.verify(token, process.env.JWT_REFRESH_SECRET!) as { sub: string; typ?: string };
+  if (p.typ && p.typ !== 'refresh') throw new Error('invalid token type');
+  return p;
 }
 
 export interface AuthedRequest extends Request { adminId?: string; adminRole?: string; }

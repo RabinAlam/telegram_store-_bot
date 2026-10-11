@@ -1,13 +1,25 @@
 import { NextResponse } from 'next/server';
+import { verifyAccess } from './admin-jwt';
 
-// Guards /api/admin/* : only callers with the shared ADMIN_API_TOKEN
-// (admin panel server-side/vite proxy) can read vault passwords or mutate.
-// Delivery credentials must ONLY reach the paying buyer (success page)
-// and the admin panel — never the public internet.
+// Guards /api/admin/* : callers with either:
+// 1. Shared ADMIN_API_TOKEN in 'x-admin-token'
+// 2. Valid Admin JWT in 'Authorization: Bearer <token>'
 export function requireAdminToken(req: Request): NextResponse | null {
+  const authHeader = req.headers.get('authorization');
+  if (authHeader?.startsWith('Bearer ')) {
+    try {
+      const payload = verifyAccess(authHeader.slice(7));
+      if (payload.sub) return null; // Authenticated via Admin JWT
+    } catch {
+      // Fall through to check x-admin-token
+    }
+  }
+
   const expected = process.env.ADMIN_API_TOKEN ?? '';
-  if (!expected) return NextResponse.json({ error: 'admin api not configured' }, { status: 503 });
   const got = req.headers.get('x-admin-token') ?? '';
-  if (got !== expected) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
-  return null;
+  if (expected && got === expected) {
+    return null; // Authenticated via shared token
+  }
+
+  return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 }

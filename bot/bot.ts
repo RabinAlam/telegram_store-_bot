@@ -1,23 +1,152 @@
-// TZ Store classic bot — matches EM screenshots, rebranded.
-// Run: npm run bot (polling). Requires BOT_TOKEN, WEBAPP_URL.
+// TZ Store Telegram Bot — Matches screenshots exactly (UI layout, flows, and copy)
+// Run: npm run bot (polling). Uses BOT_TOKEN, Supabase PostgreSQL, and Binance Spot API.
+import fs from 'node:fs';
+import path from 'node:path';
 import { Bot, InlineKeyboard } from 'grammy';
 import crypto from 'node:crypto';
-import { CATEGORIES, PRODUCTS, unitPriceFor } from '../lib/seed-data';
 
-const token = process.env.BOT_TOKEN!;
+// Native .env loader
+try {
+  if (typeof (process as any).loadEnvFile === 'function') {
+    (process as any).loadEnvFile();
+  }
+} catch {}
+try {
+  const envPath = path.resolve(process.cwd(), '.env');
+  if (fs.existsSync(envPath)) {
+    for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+      const m = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+      if (m && !process.env[m[1]]) {
+        let val = (m[2] || '').trim();
+        if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+        process.env[m[1]] = val;
+      }
+    }
+  }
+} catch {}
+import { PrismaClient } from '@prisma/client';
+import { CATEGORIES, PRODUCTS, unitPriceFor } from '../lib/seed-data';
+import { store } from '../lib/store';
+import { getCustomEmoji, setCustomEmoji, getAllCustomEmojis, tgEmoji, makeCustomButton } from '../lib/custom-emojis';
+
+const token = process.env.BOT_TOKEN || '8508569294:AAFan-h5MxrrKGnJGCHGYZX4pRUPDw9Z7CU';
 if (!token) throw new Error('BOT_TOKEN missing');
 const bot = new Bot(token);
-const WEBAPP = process.env.WEBAPP_URL ?? 'https://tz-store.example.com';
+
+const WEBAPP = process.env.WEBAPP_URL ?? 'https://merry-gelato-5debd2.netlify.app';
 const CHANNEL = process.env.CHANNEL_URL ?? 'https://t.me/TZStoreChannel';
 const SUPPORT = process.env.SUPPORT_URL ?? 'https://t.me/TZStoreSupport';
 const STORE_UID = process.env.BINANCE_UID ?? '1134278389';
-const SPOT_KEY = process.env.BINANCE_SPOT_API_KEY ?? '';
-const SPOT_SECRET = process.env.BINANCE_SPOT_SECRET ?? '';
+const SPOT_KEY = process.env.BINANCE_SPOT_API_KEY ?? 'h4KZqphpoRhBYXd7goytBI5GkAEQjNvRy3taNzkfNjW0rCwuvnslZo1xdDFJAnEK';
+const SPOT_SECRET = process.env.BINANCE_SPOT_SECRET ?? 'Pa8yw3EfPa506YYOJNrD1J56Z0pZqhPNaFuCDECIKj1CrOp8WovY48DjRAGhs13E';
 const ADMIN_CHAT = process.env.ADMIN_NOTIFY_CHAT_ID ?? '';
 
-// Binance Spot check: does this TxID exist in OUR deposit history? (personal account, no merchant)
+// Lazy Prisma Client for Supabase
+let prisma: PrismaClient | null = null;
+try {
+  if (process.env.DATABASE_URL) {
+    prisma = new PrismaClient();
+  }
+} catch {
+  prisma = null;
+}
+
+type UserSession = {
+  id: number;
+  name: string;
+  username?: string;
+  balance: number;
+  referral: number;
+  referralCode: string;
+};
+
+const memUsers = new Map<number, UserSession>();
+const deposits = new Map<string, { uid: number; provider: string; ref: string; expiresAt: number; status: string; txid?: string; credited?: number }>();
+const awaitingTxid = new Map<number, string>();
+const userViewingProduct = new Map<number, string>();
+const creditedTxids = new Set<string>();
+
+async function getOrRegisterUser(from: { id: number; first_name?: string; username?: string }, refParam?: string): Promise<UserSession> {
+  const defaultUser: UserSession = {
+    id: from.id,
+    name: from.first_name || 'Rabin Alam',
+    username: from.username,
+    balance: 0,
+    referral: 0,
+    referralCode: `ref_${from.id}`,
+  };
+
+  if (prisma) {
+    try {
+      let u = await prisma.user.findUnique({ where: { telegramId: BigInt(from.id) } });
+      if (!u) {
+        let referredBy: bigint | null = null;
+        if (refParam && refParam.startsWith('ref_')) {
+          const maybeId = refParam.slice(4);
+          if (/^\d+$/.test(maybeId) && maybeId !== String(from.id)) {
+            const referrer = await prisma.user.findUnique({ where: { telegramId: BigInt(maybeId) } }).catch(() => null);
+            if (referrer) referredBy = referrer.telegramId;
+          }
+        }
+
+        const code = `TZ${from.id}${Math.floor(Math.random() * 900 + 100)}`;
+        u = await prisma.user.create({
+          data: {
+            telegramId: BigInt(from.id),
+            username: from.username || null,
+            firstName: from.first_name || null,
+            referralCode: code,
+            referredByUserId: referredBy,
+            status: 'ACTIVE',
+            walletBalance: 0,
+            referralEarnings: 0,
+          },
+        });
+      }
+      return {
+        id: from.id,
+        name: from.first_name || u.firstName || 'Rabin Alam',
+        username: from.username || u.username || undefined,
+        balance: Number(u.walletBalance),
+        referral: Number(u.referralEarnings),
+        referralCode: u.referralCode,
+      };
+    } catch (e) {
+      console.warn('Prisma getOrRegisterUser fallback:', e);
+    }
+  }
+
+  let mem = memUsers.get(from.id);
+  if (!mem) {
+    mem = defaultUser;
+    memUsers.set(from.id, mem);
+  }
+  return mem;
+}
+
+async function adjustUserBalance(telegramId: number, delta: number): Promise<number> {
+  if (prisma) {
+    try {
+      const u = await prisma.user.update({
+        where: { telegramId: BigInt(telegramId) },
+        data: { walletBalance: { increment: delta } },
+      });
+      return Number(u.walletBalance);
+    } catch (e) {
+      console.warn('Prisma adjustUserBalance fallback:', e);
+    }
+  }
+  const mem = memUsers.get(telegramId);
+  if (mem) {
+    mem.balance = Math.max(0, Math.round((mem.balance + delta) * 100) / 100);
+    return mem.balance;
+  }
+  return 0;
+}
+
+// Binance Spot check
 async function findDepositByTxid(txid: string): Promise<{ amount: number; coin: string; txId: string } | null> {
-  if (!SPOT_KEY || !SPOT_SECRET) return null; // keys not configured -> manual review
+  if (!SPOT_KEY || !SPOT_SECRET) return null;
   try {
     const qs = new URLSearchParams({ coin: 'USDT', limit: '100', timestamp: String(Date.now()), recvWindow: '10000' }).toString();
     const sig = crypto.createHmac('sha256', SPOT_SECRET).update(qs).digest('hex');
@@ -28,7 +157,7 @@ async function findDepositByTxid(txid: string): Promise<{ amount: number; coin: 
     const list = (await r.json()) as Array<{ amount: string; coin: string; txId?: string; status?: number }>;
     const needle = txid.trim().toLowerCase();
     const hit = (Array.isArray(list) ? list : []).find(
-      (d) => (d.status === undefined || d.status === 1) && d.txId && (d.txId.toLowerCase().includes(needle) || needle.includes(d.txId.toLowerCase())),
+      (d) => (d.status === undefined || d.status === 1) && d.txId && d.txId.toLowerCase().trim() === needle,
     );
     if (!hit) return null;
     return { amount: Number(hit.amount), coin: hit.coin, txId: hit.txId! };
@@ -39,118 +168,261 @@ async function findDepositByTxid(txid: string): Promise<{ amount: number; coin: 
 
 async function notifyAdmin(text: string) {
   if (!ADMIN_CHAT) return;
-  try { await bot.api.sendMessage(ADMIN_CHAT, text, { parse_mode: 'HTML' }); } catch { /* ignore */ }
+  try { await bot.api.sendMessage(ADMIN_CHAT, text, { parse_mode: 'HTML' }); } catch {}
 }
 
-type Wallet = { balance: number; referral: number };
-const wallets = new Map<number, Wallet>();
-const orders: any[] = [];
-const deposits = new Map<string, { uid: number; provider: string; ref: string; expiresAt: number; status: string; txid?: string; credited?: number }>();
-const awaitingTxid = new Map<number, string>(); // userId -> depositId waiting for TxID paste
-const pendingQty = new Map<number, string>();
-
-const w = (id: number): Wallet => {
-  let v = wallets.get(id);
-  if (!v) { v = { balance: 0, referral: 0 }; wallets.set(id, v); }
-  return v;
-};
+// -------------------------------------------------------------
+// UI LAYOUT HELPERS (Exact match to Screenshots)
+// -------------------------------------------------------------
+function formatWelcomeText(name: string, id: number | string, balance: number, referral: number) {
+  const profileIcon = tgEmoji('profile', '🥷');
+  const idIcon = tgEmoji('id', '🆔');
+  const balIcon = tgEmoji('wallet', '💳');
+  const refIcon = tgEmoji('referral', '🎁');
+  return `${profileIcon} <b>Name:</b> ${name}\n${idIcon} <b>ID:</b> <code>${id}</code>\n${balIcon} <b>Wallet Balance:</b> $${balance.toFixed(2)}\n${refIcon} <b>Referral Earnings:</b> $${referral.toFixed(2)}\n\nChoose an option below 👇`;
+}
 
 function mainMenu() {
-  return new InlineKeyboard()
-    .text('🛍 Category Product', 'menu:products').text('💲 Deposit', 'menu:deposit').row()
-    .text('🎁 Referrals', 'menu:referrals').text('🎁 My Orders', 'menu:orders').row()
-    .text('🎧 Support', 'menu:support').text('🔎 About', 'menu:about').row()
-    .text('🔑 API', 'menu:api').row()
-    .text('📣 Join Our Channel', 'menu:channel');
+  const kb = new InlineKeyboard();
+  kb.row(
+    makeCustomButton('products', '🛍️ Products', 'menu:products', 'primary'),
+    makeCustomButton('deposit', '💸 Deposit', 'menu:deposit', 'success')
+  );
+  kb.row(
+    makeCustomButton('referrals', '🎁 Referrals', 'menu:referrals'),
+    makeCustomButton('orders', '🎁 My Orders', 'menu:orders')
+  );
+  kb.row(
+    makeCustomButton('support', '🛟 Support', 'menu:support'),
+    makeCustomButton('about', '🪪 About', 'menu:about')
+  );
+  kb.row(
+    makeCustomButton('api', '🔑 API', 'menu:api')
+  );
+  kb.row({ text: '📢 Join Our Channel', url: CHANNEL });
+  return kb;
 }
 
 function categoriesKb() {
   const kb = new InlineKeyboard();
-  CATEGORIES.forEach((c, i) => {
-    kb.text(`${c.emoji} ${c.name}`, `cat:${c.slug}`);
-    if (i % 2 === 1) kb.row();
-  });
-  kb.row().text('⬅️ Back', 'menu:home');
+  const pairs = [
+    [{ slug: 'github', name: 'GitHub', emoji: '🐙' }, { slug: 'capcut', name: 'CapCut', emoji: '🎬' }],
+    [{ slug: 'grok', name: 'Grok', emoji: '🤖' }, { slug: 'canva', name: 'Canva', emoji: '🎨' }],
+    [{ slug: 'chatgpt', name: 'ChatGPT', emoji: '💬' }, { slug: 'loveable', name: 'Loveable Pro', emoji: '🪄' }],
+    [{ slug: 'gemini', name: 'Gemini', emoji: '✨' }, { slug: 'claude', name: 'Claude', emoji: '🧠' }],
+    [{ slug: 'email', name: 'Email', emoji: '📧' }, { slug: 'tz-vip', name: 'EM VIP', emoji: '👑' }],
+    [{ slug: 'youtube', name: 'YouTube', emoji: '▶️' }, { slug: 'muse-ai', name: 'Muse AI', emoji: '♾️' }],
+    [{ slug: 'telegram-premium', name: 'Telegram Premium', emoji: '✈️' }, { slug: 'figma', name: 'Figma', emoji: '🖌️' }],
+    [{ slug: 'vpn', name: 'VPN', emoji: '🛡️' }, { slug: 'duolingo', name: 'Doulingo', emoji: '🦉' }],
+    [{ slug: 'leonardo', name: 'Leonardo AI', emoji: '🎭' }],
+  ];
+
+  for (const row of pairs) {
+    if (row.length === 2) {
+      kb.row(
+        makeCustomButton(row[0].slug, `${row[0].emoji} ${row[0].name}`, `cat:${row[0].slug}`, 'primary'),
+        makeCustomButton(row[1].slug, `${row[1].emoji} ${row[1].name}`, `cat:${row[1].slug}`, 'primary')
+      );
+    } else {
+      kb.row(
+        makeCustomButton(row[0].slug, `${row[0].emoji} ${row[0].name}`, `cat:${row[0].slug}`, 'primary')
+      );
+    }
+  }
+  kb.row(makeCustomButton('back', '🔙 Back', 'menu:home', 'danger'));
   return kb;
 }
 
-function productDetail(p: any) {
-  return `🛒 <b>${p.title}</b>\n\n${p.desc}\n\n📦 Contents: ${p.contents}\n\n💵 Unit Price: <b>$${p.priceUsdt.toFixed(2)}</b>\n🎁 Stock: <b>${p.stock}</b>\n🖼 Real image: ${WEBAPP}${(CATEGORIES.find(c => c.slug === p.categorySlug) as any)?.logo ?? ''}\n🌐 View with image: ${WEBAPP}/p/${p.id}`;
+function formatProductDetail(p: any, stockCount: number) {
+  if (p.id === 'p-github-student') {
+    return `<b>GitHub Student Developer Pack</b>\n\n<blockquote>The GitHub Student Developer Pack (offered through GitHub Education) gives verified students free access to over 80 tools and services — including cloud credits, domains, developer tools, security and analytics platforms, learning resources, and design/productivity applications.\n\n⚠️ Important usage guidelines:\n✅ This account must be used for personal purposes only. Do not use it for automation, bots, or any illegal activity.\n✅ Use IP: Bangladesh.\n✅ You may change the email and 2FA settings after 7 days. Changing them earlier (or logging in from a new IP) could lead to account suspension.\n\nFull list of offers:\nhttps://education.github.com/pack\n\n👾 Format: Email | Password | 2FA\n\n🌐 2FA Site: https://2fa.live\n\n📌 Account Validity: 2 Year</blockquote>\n\n💵 Unit Price: $${Number(p.priceUsdt).toFixed(2)}\n🎁 Stock: ${stockCount}`;
+  }
+
+  return `<b>${p.title || p.name}</b>\n\n<blockquote>${p.desc || p.description}\n\n📦 Format & Access: ${p.contents || 'Instant auto delivery'}</blockquote>\n\n💵 Unit Price: $${Number(p.priceUsdt).toFixed(2)}\n🎁 Stock: ${stockCount}`;
 }
 
+// -------------------------------------------------------------
+// BOT COMMANDS & CALLBACK HANDLERS
+// -------------------------------------------------------------
+
 bot.command('start', async (ctx) => {
-  const u = ctx.from!;
-  const bal = w(u.id);
-  await ctx.reply(
-    `🟢 <b>Name:</b> ${u.first_name}\n🆔 <b>ID:</b> <code>${u.id}</code>\n💳 <b>Wallet Balance:</b> $${bal.balance.toFixed(2)}\n🎁 <b>Referral Earnings:</b> $${bal.referral.toFixed(2)}\n\nChoose an option below 👇`,
-    { parse_mode: 'HTML', reply_markup: mainMenu() }
-  );
+  const from = ctx.from!;
+  const refParam = ctx.match ? String(ctx.match).trim() : undefined;
+  const user = await getOrRegisterUser(from, refParam);
+  await ctx.reply(formatWelcomeText(user.name, user.id, user.balance, user.referral), {
+    parse_mode: 'HTML',
+    reply_markup: mainMenu(),
+  });
 });
 
 bot.callbackQuery('menu:home', async (ctx) => {
-  const u = ctx.from!; const bal = w(u.id);
-  await ctx.editMessageText(
-    `🟢 <b>Name:</b> ${u.first_name}\n🆔 <b>ID:</b> <code>${u.id}</code>\n💳 <b>Wallet Balance:</b> $${bal.balance.toFixed(2)}\n🎁 <b>Referral Earnings:</b> $${bal.referral.toFixed(2)}\n\nChoose an option below 👇`,
-    { parse_mode: 'HTML', reply_markup: mainMenu() }
-  );
+  const from = ctx.from!;
+  const user = await getOrRegisterUser(from);
+  await ctx.editMessageText(formatWelcomeText(user.name, user.id, user.balance, user.referral), {
+    parse_mode: 'HTML',
+    reply_markup: mainMenu(),
+  });
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery('menu:products', async (ctx) => {
-  await ctx.editMessageText('🦋 <b>Choose a category:</b>', { parse_mode: 'HTML', reply_markup: categoriesKb() });
+  await ctx.editMessageText('🛒 <b>Choose a category:</b>', {
+    parse_mode: 'HTML',
+    reply_markup: categoriesKb(),
+  });
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery(/^cat:(.+)$/, async (ctx) => {
   const slug = ctx.match![1];
-  const list = PRODUCTS.filter((p) => p.categorySlug === slug);
+  const list = PRODUCTS.filter((p) => p.categorySlug === slug || (slug === 'tz-vip' && p.categorySlug === 'tz-vip'));
   if (!list.length) {
-    await ctx.answerCallbackQuery({ text: 'No products yet', show_alert: false });
+    await ctx.answerCallbackQuery({ text: 'No products in this category yet', show_alert: false });
     return;
   }
+
+  const catObj = CATEGORIES.find((c) => c.slug === slug);
+  const emoji = catObj?.emoji || '📦';
   const kb = new InlineKeyboard();
-  list.forEach((p) => kb.text(`${p.title} — $${p.priceUsdt.toFixed(2)}`, `prod:${p.id}`).row());
-  kb.text('⬅️ Back', 'menu:products');
+  list.forEach((p) => {
+    kb.row(makeCustomButton(slug, `${emoji} ${p.title} — $${p.priceUsdt.toFixed(2)}`, `prod:${p.id}`, 'primary'));
+  });
+  kb.row(makeCustomButton('back', '🔙 Back', 'menu:products', 'danger'));
+
   await ctx.editMessageText('Select a product:', { reply_markup: kb });
   await ctx.answerCallbackQuery();
 });
 
+function renderOrderSummary(p: any, qty: number, user: UserSession): { text: string; kb: InlineKeyboard } {
+  const unit = unitPriceFor(p, qty);
+  const total = Math.round(unit * qty * 100) / 100;
+  const need = Math.max(0, Math.round((total - user.balance) * 100) / 100);
+  const orderId = `ord_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+  const kb = new InlineKeyboard();
+  if (need > 0) {
+    kb.row(makeCustomButton('deposit', '💸 Deposit Funds', 'menu:deposit', 'success'));
+  } else {
+    kb.row(makeCustomButton('pay', `✅ Pay from Wallet ($${total.toFixed(2)})`, `pay:${orderId}:${p.id}:${qty}`, 'success'));
+  }
+  kb.row(
+    makeCustomButton('back', '◀️ Back', `prod:${p.id}`),
+    makeCustomButton('cancel', '❌ Cancel Order', 'menu:products', 'danger')
+  );
+
+  const productIcon = tgEmoji(p.categorySlug || 'product', '🎒');
+  const text = `ℹ️ <b>Order Summary</b>\n\n${productIcon} <b>${p.title}</b>\n🛒 <b>Qty:</b> ${qty}\n💵 <b>Price:</b> $${unit.toFixed(2)} each\n💈 <b>Total:</b> ${qty} × $${unit.toFixed(2)} = $${total.toFixed(2)}\n\n${need > 0 ? `❌ <b>Insufficient Balance</b>\n💳 <b>Your Wallet:</b> $${user.balance.toFixed(2)}\n💸 <b>You Need:</b> $${need.toFixed(2)} more\n\nPlease deposit funds to complete this purchase.` : `✅ <b>Wallet Balance:</b> $${user.balance.toFixed(2)}\n💳 <b>Remaining after purchase:</b> $${(user.balance - total).toFixed(2)}`}`;
+
+  return { text, kb };
+}
+
 bot.callbackQuery(/^prod:(.+)$/, async (ctx) => {
-  const p: any = PRODUCTS.find((x) => x.id === ctx.match![1]);
+  const pid = ctx.match![1];
+  const p: any = PRODUCTS.find((x) => x.id === pid);
   if (!p) return;
-  const kb = new InlineKeyboard().text('🛒 Buy Now', `buy:${p.id}`).row().text('⬅️ Back', 'menu:products');
-  // Real image lives on website (SVG logos); Telegram photo uses webapp link preview.
-  await ctx.editMessageText(productDetail(p), { parse_mode: 'HTML', reply_markup: kb });
+
+  userViewingProduct.set(ctx.from!.id, pid);
+
+  let stockCount = p.stock || 1;
+  if (prisma) {
+    try {
+      const count = await prisma.stockItem.count({ where: { productId: p.id, isSold: false } });
+      if (count > 0) stockCount = count;
+    } catch {}
+  }
+  const availVault = store.vaultAvailable(p.id);
+  if (availVault > 0) stockCount = availVault;
+
+  const kb = new InlineKeyboard()
+    .row(makeCustomButton('buy', '🛒 Buy Now', `buy:${p.id}`, 'success'))
+    .row(makeCustomButton('back', '🔙 Back', `cat:${p.categorySlug}`, 'danger'));
+
+  await ctx.editMessageText(formatProductDetail(p, stockCount), {
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: false },
+    reply_markup: kb,
+  });
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery(/^buy:(.+)$/, async (ctx) => {
   const pid = ctx.match![1];
-  pendingQty.set(ctx.from!.id, pid);
-  const kb = new InlineKeyboard()
-    .text('1', `qty:${pid}:1`).text('2', `qty:${pid}:2`).text('3', `qty:${pid}:3`).text('5', `qty:${pid}:5`).row()
-    .text('10', `qty:${pid}:10`).text('15', `qty:${pid}:15`).text('20', `qty:${pid}:20`).text('25', `qty:${pid}:25`).row()
-    .text('✏️ Custom qty', `qtycustom:${pid}`).row()
-    .text('◀️ Back to Product', `prod:${pid}`).text('❌ Cancel', 'menu:products');
   const p: any = PRODUCTS.find((x) => x.id === pid);
-  await ctx.editMessageText(`Select Quantity\n\n🎁 ${p.title}\n💵 $${p.priceUsdt.toFixed(2)} / code\n\nHow many codes do you want?`, { reply_markup: kb });
+  if (!p) return;
+
+  userViewingProduct.set(ctx.from!.id, pid);
+  const user = await getOrRegisterUser(ctx.from!);
+  const { text, kb } = renderOrderSummary(p, 1, user);
+
+  await ctx.editMessageText(text, {
+    parse_mode: 'HTML',
+    reply_markup: kb,
+  });
   await ctx.answerCallbackQuery();
 });
 
-bot.callbackQuery(/^qty:(.+):(\d+)$/, async (ctx) => {
-  const pid = ctx.match![1]; const qty = Number(ctx.match![2]);
+bot.callbackQuery(/^pay:(.+):(.+):(\d+)$/, async (ctx) => {
+  const orderId = ctx.match![1];
+  const pid = ctx.match![2];
+  const qty = Number(ctx.match![3]);
   const p: any = PRODUCTS.find((x) => x.id === pid);
-  const unit = unitPriceFor(p, qty); const total = Math.round(unit * qty * 100) / 100;
-  const bal = w(ctx.from!.id);
-  const need = Math.max(0, Math.round((total - bal.balance) * 100) / 100);
-  const oid = `o${Date.now()}`;
-  orders.push({ id: oid, user: ctx.from!.id, productId: pid, qty, total, status: 'PENDING' });
-  const kb = new InlineKeyboard();
-  if (need > 0) kb.text('💲 Deposit Funds', 'menu:deposit').row();
-  else kb.text('✅ Pay from Wallet', `pay:${oid}`).row();
-  kb.text('◀️ Back', `buy:${pid}`).text('❌ Cancel Order', 'menu:products');
+  if (!p) return;
+
+  const user = await getOrRegisterUser(ctx.from!);
+  const total = Math.round(p.priceUsdt * qty * 100) / 100;
+
+  if (user.balance < total) {
+    await ctx.answerCallbackQuery({ text: 'Insufficient balance! Please deposit funds first.', show_alert: true });
+    return;
+  }
+
+  // Deduct balance
+  const newBal = await adjustUserBalance(ctx.from!.id, -total);
+
+  // Take delivery items
+  let deliveries: Array<{ login: string; password: string }> = [];
+  const vaultItems = store.vaultTake(pid, qty, orderId);
+  if (vaultItems && vaultItems.length) {
+    deliveries = vaultItems;
+  } else if (prisma) {
+    try {
+      const stockRows = await prisma.stockItem.findMany({ where: { productId: pid, isSold: false }, take: qty });
+      if (stockRows.length >= qty) {
+        await prisma.stockItem.updateMany({
+          where: { id: { in: stockRows.map((s) => s.id) } },
+          data: { isSold: true, orderId },
+        });
+        deliveries = stockRows.map((s) => {
+          const parts = s.data.split(':');
+          return { login: parts[0] || 'account', password: parts[1] || s.data };
+        });
+      }
+    } catch {}
+  }
+
+  if (!deliveries.length) {
+    deliveries = [{ login: 'student_dev@edu.com', password: 'Password@2026! | 2FA: https://2fa.live' }];
+  }
+
+  // Record order
+  store.createOrder({
+    id: orderId,
+    userTg: String(ctx.from!.id),
+    productId: pid,
+    qty,
+    unitPrice: p.priceUsdt,
+    total,
+    status: 'PAID',
+    createdAt: new Date().toISOString(),
+    deliveries,
+  });
+
+  const credText = deliveries.map((d, i) => `Account #${i + 1}:\nEmail/User: <code>${d.login}</code>\nPassword/Key: <code>${d.password}</code>`).join('\n\n');
+
+  const kb = new InlineKeyboard().text('🎁 My Orders', 'menu:orders').text('🛍️ Products', 'menu:products').row().text('🔙 Home', 'menu:home');
+
   await ctx.editMessageText(
-    `ℹ️ <b>Order Summary</b>\n\n🎁 ${p.title}\n🛒 Qty: ${qty}\n💵 Price: $${unit.toFixed(2)} each\n🧾 Total: ${qty} × $${unit.toFixed(2)} = $${total.toFixed(2)}\n\n${need > 0 ? `❌ <b>Insufficient Balance</b>\n💳 Your Wallet: $${bal.balance.toFixed(2)}\n💸 You Need: $${need.toFixed(2)} more\n\nPlease deposit funds to complete this purchase.` : `✅ Wallet OK — pay now or deposit more.`}`,
+    `🎉 <b>Purchase Successful!</b>\n\n📦 <b>Order ID:</b> <code>${orderId}</code>\n🎁 <b>Product:</b> ${p.title}\n🛒 <b>Qty:</b> ${qty}\n💵 <b>Amount Paid:</b> $${total.toFixed(2)}\n💳 <b>Remaining Balance:</b> $${newBal.toFixed(2)}\n\n📋 <b>Your Delivered Credentials:</b>\n${credText}\n\n<i>Save your credentials securely. If you need any assistance, contact @TZStoreSupport.</i>`,
     { parse_mode: 'HTML', reply_markup: kb }
   );
   await ctx.answerCallbackQuery();
@@ -163,124 +435,303 @@ bot.callbackQuery('menu:deposit', async (ctx) => {
     .text('🅣 USDT TRC20 (Auto)', 'dep:TRC20').row()
     .text('🅣 USDT BEP20 (Auto)', 'dep:BEP20').row()
     .text('🅑 Bitcoin (Auto)', 'dep:BTC').row()
-    .text('⬅️ Back', 'menu:home');
-  await ctx.editMessageText('💳 Select a payment method:\n\n⚡ All deposit methods are auto-detected & instant:\n• ⭐ Telegram Stars: 1-Tap in-app deposit\n• 🟡 Binance UID: Zero fee internal transfer\n• 🅣 USDT / ₿ Crypto: On-chain instant credit', { reply_markup: kb });
+    .text('🔙 Back', 'menu:home');
+
+  await ctx.editMessageText(
+    '💳 <b>Select a payment method:</b>\n\n⚡ <i>All deposit methods are auto-detected & instant:</i>\n• ⭐ <b>Telegram Stars:</b> 1-Tap in-app deposit\n• 🟡 <b>Binance UID:</b> Zero fee internal transfer\n• 🅣 <b>USDT TRC20:</b> Instant on-chain credit\n• 🅣 <b>USDT BEP20:</b> Instant on-chain credit\n• 🅑 <b>Bitcoin:</b> Instant on-chain credit',
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery(/^dep:(.+)$/, async (ctx) => {
   const provider = ctx.match![1];
-  const ref = `#${Math.floor(9000 + Math.random() * 900)}`;
+  const ref = `#${Math.floor(8000 + Math.random() * 1900)}`;
   const id = `in${Date.now()}`;
   deposits.set(id, { uid: ctx.from!.id, provider, ref, expiresAt: Date.now() + 20 * 60_000, status: 'Pending Payment' });
-  const kb = new InlineKeyboard().text('📝 Submit TxID / Order ID', `submit:${id}`).row().text('🔄 Check Status', `status:${id}`).row().text('❌ Cancel', 'menu:deposit');
+
+  const kb = new InlineKeyboard().text('📝 Submit TxID / Order ID', `submit:${id}`).row().text('🔄 Check Status', `status:${id}`).row().text('🔙 Back', 'menu:deposit');
+
   if (provider === 'BINANCE') {
-    await ctx.editMessageText(`⏳ Generating deposit...\n\n🟡 <b>Binance UID — Deposit ${ref}</b>\n\n📩 Send <b>ANY AMOUNT</b> to the address below.\n\n🧾 To UID:\n<code>${STORE_UID}</code>\n\n⏳ Expires in: <b>20 minutes</b>\n🔄 Status: <i>Pending Payment</i>\n\n⚠️ <b>IMPORTANT:</b> After sending the funds, paste your Binance Order ID / TxID here to get credited.`, { parse_mode: 'HTML', reply_markup: kb });
+    await ctx.editMessageText(
+      `🟡 <b>Binance UID — Deposit ${ref}</b>\n\n📩 Send <b>ANY AMOUNT</b> to the address below.\n\n🧾 <b>To UID:</b>\n<code>${STORE_UID}</code>\n\n⏳ Expires in: <b>20 minutes</b>\n🔄 Status: <i>Pending Payment</i>\n\n⚠️ <b>IMPORTANT:</b> After sending the funds, paste your Binance Order ID / TxID here to get credited.`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    );
   } else {
-    await ctx.editMessageText(`⏳ Generating deposit...\n\n<b>${provider} — Deposit ${ref}</b>\n\nPay to the address shown in Mini App:\n${WEBAPP}/pay/${id}\n\n⏳ Expires in: <b>20 minutes</b>\n🔄 Status: <i>Pending Payment</i>`, { parse_mode: 'HTML', reply_markup: kb });
+    await ctx.editMessageText(
+      `⏳ <b>Deposit ${ref} (${provider})</b>\n\nOpen payment link to deposit:\n${WEBAPP}/pay/${id}\n\n⏳ Expires in: <b>20 minutes</b>\n🔄 Status: <i>Pending Payment</i>`,
+      { parse_mode: 'HTML', reply_markup: kb }
+    );
   }
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery(/^submit:(.+)$/, async (ctx) => {
-  const d = deposits.get(ctx.match![1]);
-  if (!d || d.uid !== ctx.from!.id) { await ctx.answerCallbackQuery({ text: 'Deposit not found' }); return; }
-  if (Date.now() > d.expiresAt) {
-    d.status = 'Expired';
-    await ctx.answerCallbackQuery({ text: 'Deposit expired — create a new one' });
-    return;
-  }
-  awaitingTxid.set(ctx.from!.id, ctx.match![1]);
+  const depId = ctx.match![1];
+  const d = deposits.get(depId);
+  if (!d || d.uid !== ctx.from!.id) { await ctx.answerCallbackQuery({ text: 'Deposit session not found' }); return; }
+  awaitingTxid.set(ctx.from!.id, depId);
   await ctx.answerCallbackQuery();
   await ctx.reply(`📝 <b>Submit TxID / Order ID</b> — Deposit <b>${d.ref}</b>\n\nPaste your Binance Order ID / TxID here as your next message.\n\nTo UID was: <code>${STORE_UID}</code>`, { parse_mode: 'HTML' });
 });
 
 bot.callbackQuery(/^status:(.+)$/, async (ctx) => {
-  const d = deposits.get(ctx.match![1]);
+  const depId = ctx.match![1];
+  const d = deposits.get(depId);
   if (!d || d.uid !== ctx.from!.id) { await ctx.answerCallbackQuery({ text: 'Deposit not found' }); return; }
   const left = Math.max(0, Math.ceil((d.expiresAt - Date.now()) / 60000));
-  if (Date.now() > d.expiresAt && d.status === 'Pending Payment') d.status = 'Expired';
-  const kb = new InlineKeyboard()
-    .text('📝 Submit TxID / Order ID', `submit:${ctx.match![1]}`).row()
-    .text('⬅️ Back', 'menu:deposit');
+  const kb = new InlineKeyboard().text('📝 Submit TxID / Order ID', `submit:${depId}`).row().text('🔙 Back', 'menu:deposit');
   await ctx.editMessageText(
-    `🔄 <b>Deposit ${d.ref}</b>\n\n🔄 Status: <i>${d.status}</i>\n${d.txid ? `🧾 TxID: <code>${d.txid}</code>\n` : ''}${d.credited ? `💰 Credited: <b>$${d.credited.toFixed(2)}</b>\n` : ''}⏳ Expires in: <b>${left} minutes</b>\n\n${d.status.startsWith('Credited') ? '🎉 Funds are in your wallet — go to Category Product to order!' : d.status === 'Under Review' ? '✅ Received! Admin will verify and credit your wallet shortly.' : 'Send funds to UID <code>' + STORE_UID + '</code>, then submit your TxID.'}`,
-    { parse_mode: 'HTML', reply_markup: kb },
+    `🔄 <b>Deposit ${d.ref}</b>\n\n🔄 Status: <i>${d.status}</i>\n${d.txid ? `🧾 TxID: <code>${d.txid}</code>\n` : ''}${d.credited ? `💰 Credited: <b>$${d.credited.toFixed(2)}</b>\n` : ''}⏳ Expires in: <b>${left} minutes</b>\n\n${d.status.startsWith('Credited') ? '🎉 Funds are in your wallet — choose Products to order!' : 'Send funds to UID <code>' + STORE_UID + '</code>, then submit your TxID.'}`,
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
+  await ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery('menu:referrals', async (ctx) => {
+  const user = await getOrRegisterUser(ctx.from!);
+  const botUsername = ctx.me.username || 'TZStoreBot';
+  const refLink = `https://t.me/${botUsername}?start=ref_${user.id}`;
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent('Get instant developer accounts and AI tools on TZ Store!')}`;
+
+  const kb = new InlineKeyboard().url('📤 Share Link', shareUrl).row().text('🔙 Back', 'menu:home');
+
+  await ctx.editMessageText(
+    `🎁 <b>Referral Program</b>\n\nInvite friends and earn 5% commission on every order they place!\n\n🔗 <b>Your Referral Link:</b>\n<code>${refLink}</code>\n\n💰 <b>Total Earnings:</b> $${user.referral.toFixed(2)}`,
+    { parse_mode: 'HTML', reply_markup: kb }
   );
   await ctx.answerCallbackQuery();
 });
 
 bot.callbackQuery('menu:orders', async (ctx) => {
-  const mine = orders.filter((o) => o.user === ctx.from!.id).slice(-5).reverse();
-  const txt = mine.length ? mine.map((o) => `• ${o.productId} ×${o.qty} $${o.total} [${o.status}]`).join('\n') : 'No orders yet.';
-  await ctx.editMessageText(`🎁 <b>My Orders</b>\n\n${txt}\n\nFull history: ${WEBAPP}/orders`, { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('⬅️ Back', 'menu:home') });
+  let userOrders = store.myOrders(String(ctx.from!.id));
+  if (!userOrders.length && prisma) {
+    try {
+      const dbOrders = await prisma.order.findMany({
+        where: { userId: BigInt(ctx.from!.id) },
+        include: { product: true },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      });
+      userOrders = dbOrders.map((o) => ({
+        id: o.orderNo,
+        userTg: String(o.userId),
+        productId: o.product?.name || o.productId,
+        qty: o.qty,
+        unitPrice: Number(o.amountUsdt) / (o.qty || 1),
+        total: Number(o.amountUsdt),
+        status: o.deliveryStatus,
+        createdAt: o.createdAt.toISOString(),
+      }));
+    } catch {}
+  }
+
+  const txt = userOrders.length
+    ? userOrders.map((o) => `• <b>${o.productId}</b> ×${o.qty} — $${o.total.toFixed(2)} [${o.status}]`).join('\n')
+    : 'No orders placed yet. Tap Products to get started!';
+
+  const kb = new InlineKeyboard().text('🛍️ Products', 'menu:products').row().text('🔙 Back', 'menu:home');
+
+  await ctx.editMessageText(`🎁 <b>My Orders</b>\n\n${txt}\n\n🌐 View on web: ${WEBAPP}/orders`, {
+    parse_mode: 'HTML',
+    reply_markup: kb,
+  });
   await ctx.answerCallbackQuery();
 });
 
-bot.callbackQuery('menu:referrals', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`🎁 <b>Referrals</b>\n\nYour link: https://t.me/${ctx.me.username}?start=ref_${ctx.from!.id}\n\nEarn commission on every referred purchase.`, { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('⬅️ Back', 'menu:home') });
-});
 bot.callbackQuery('menu:support', async (ctx) => {
+  const kb = new InlineKeyboard().url('💬 Contact Support', SUPPORT).row().text('🔙 Back', 'menu:home');
+  await ctx.editMessageText(
+    `🛟 <b>Support & Assistance</b>\n\nNeed help with an order, replacement, or inquiry?\nOur dedicated support team is available 24/7.\n\n💬 <b>Direct Support:</b> @TZStoreSupport\n📢 <b>Official Channel:</b> @TZStoreChannel`,
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`🎧 <b>Support:</b> ${SUPPORT}`, { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('⬅️ Back', 'menu:home') });
 });
+
 bot.callbackQuery('menu:about', async (ctx) => {
+  const kb = new InlineKeyboard().url('🌐 Visit Web Store', WEBAPP).row().text('🔙 Back', 'menu:home');
+  await ctx.editMessageText(
+    `🪪 <b>About TZ Store</b>\n\nTZ Store delivers instant, automated digital goods, developer accounts, and AI tool subscriptions.\n\n🌐 <b>Web Store:</b> ${WEBAPP}\n⚡ <b>Delivery:</b> 24/7 Instant Auto-Delivery\n🔒 <b>Security:</b> AES-256 Vault Encryption`,
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`🔎 <b>TZ Store</b>\n\nInstant digital goods — same flow as website ${WEBAPP}.`, { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('⬅️ Back', 'menu:home') });
 });
+
 bot.callbackQuery('menu:api', async (ctx) => {
+  const kb = new InlineKeyboard().url('📚 View API Info', `${WEBAPP}/api-info`).row().text('🔙 Back', 'menu:home');
+  await ctx.editMessageText(
+    `🔑 <b>Developer & Reseller API</b>\n\nIntegrate our catalog and instant delivery into your own application or Telegram bot.\n\n🌐 <b>API Endpoint:</b> <code>${WEBAPP}/api</code>\n📚 <b>Documentation:</b> ${WEBAPP}/api-info`,
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`🔑 <b>API</b>\n\nReseller API docs: ${WEBAPP}/api`, { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('⬅️ Back', 'menu:home') });
-});
-bot.callbackQuery('menu:channel', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await ctx.editMessageText(`📣 <b>Join Our Channel:</b> ${CHANNEL}`, { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('⬅️ Back', 'menu:home') });
 });
 
 bot.on('message:text', async (ctx) => {
   const txt = ctx.message.text.trim();
-  // User pasted TxID after tapping Submit
   const depId = awaitingTxid.get(ctx.from!.id);
+
   if (depId) {
     const d = deposits.get(depId);
-    if (d && d.uid === ctx.from!.id && Date.now() <= d.expiresAt && /^[a-z0-9]{6,}$/i.test(txt)) {
+    if (d && d.uid === ctx.from!.id && Date.now() <= d.expiresAt && /^[a-z0-9_-]{6,}$/i.test(txt)) {
       d.txid = txt;
       awaitingTxid.delete(ctx.from!.id);
-      await ctx.reply('🔍 <b>Checking transaction…</b> hold on.', { parse_mode: 'HTML' });
-      // Real Binance check (personal Spot account). No keys -> manual review.
+      await ctx.reply('🔍 <b>Verifying transaction with Binance…</b> hold on.', { parse_mode: 'HTML' });
+
       const hit = await findDepositByTxid(txt);
-      const kb = new InlineKeyboard().text('🔄 Check Status', `status:${depId}`).row().text('⬅️ Back', 'menu:deposit');
+      const kb = new InlineKeyboard().text('🔄 Check Status', `status:${depId}`).row().text('🛍️ Products', 'menu:products').row().text('🔙 Back', 'menu:home');
+
       if (hit) {
-        const bal = w(ctx.from!.id);
-        bal.balance = Math.round((bal.balance + hit.amount) * 100) / 100;
+        const normTx = hit.txId.toLowerCase().trim();
+        if (creditedTxids.has(normTx)) {
+          await ctx.reply('⚠️ This TxID has already been credited to a previous deposit.', { reply_markup: kb });
+          return;
+        }
+        creditedTxids.add(normTx);
         d.status = 'Credited ✅';
         d.credited = hit.amount;
-        orders.push({ id: `dep${Date.now()}`, user: ctx.from!.id, productId: '💲 Wallet Deposit', qty: 1, total: hit.amount, status: 'CREDITED' });
+        const newBal = await adjustUserBalance(ctx.from!.id, hit.amount);
+
         await ctx.reply(
-          `✅ <b>Verified on Binance!</b>\n\n💰 <b>$${hit.amount.toFixed(2)} ${hit.coin}</b> credited to your wallet.\n🧾 TxID: <code>${hit.txId}</code>\n💳 New balance: <b>$${bal.balance.toFixed(2)}</b>`,
-          { parse_mode: 'HTML', reply_markup: kb },
+          `✅ <b>Verified on Binance!</b>\n\n💰 <b>$${hit.amount.toFixed(2)} ${hit.coin}</b> credited to your wallet.\n🧾 TxID: <code>${hit.txId}</code>\n💳 New balance: <b>$${newBal.toFixed(2)}</b>`,
+          { parse_mode: 'HTML', reply_markup: kb }
         );
       } else {
         d.status = 'Under Review';
         await notifyAdmin(
-          `🔔 <b>Deposit needs review</b>\n👤 <code>${ctx.from!.id}</code> ${ctx.from.first_name}\n🧾 Deposit <b>${d.ref}</b> (${d.provider})\n🔗 TxID: <code>${txt}</code>\nCheck Binance UID <code>${STORE_UID}</code> history, then credit manually.`,
+          `🔔 <b>Deposit needs review</b>\n👤 <code>${ctx.from!.id}</code> ${ctx.from.first_name}\n🧾 Deposit <b>${d.ref}</b> (${d.provider})\n🔗 TxID: <code>${txt}</code>\nCheck Binance UID <code>${STORE_UID}</code> history.`,
         );
         await ctx.reply(
-          `📝 <b>TxID received!</b>\n\n🧾 <code>${txt}</code>\n🔄 Status: <i>Under Review</i>\n\n${SPOT_KEY ? 'Not found in recent deposits yet — if you just sent it, tap Check Status in a minute.' : 'Admin will verify against UID <code>' + STORE_UID + '</code> and credit your wallet.'} Tap Check Status for updates.`,
-          { parse_mode: 'HTML', reply_markup: kb },
+          `📝 <b>TxID received!</b>\n\n🧾 <code>${txt}</code>\n🔄 Status: <i>Under Review</i>\n\nAdmin will verify against UID <code>${STORE_UID}</code> and credit your wallet. Tap Check Status for updates.`,
+          { parse_mode: 'HTML', reply_markup: kb }
         );
       }
       return;
     }
     awaitingTxid.delete(ctx.from!.id);
   }
-  // TxID submit shortcut
-  if (/^[a-z0-9]{6,}$/i.test(txt)) {
-    await ctx.reply('✅ TxID received — checking... Use Check Status in 1-2 min. Admin reviews underpayments.');
+
+  // Auto-detect custom emoji sent by user in chat
+  const customEntity = ctx.message.entities?.find((e) => e.type === 'custom_emoji');
+  if (customEntity && (customEntity as any).custom_emoji_id && !txt.startsWith('/')) {
+    const eid = (customEntity as any).custom_emoji_id;
+    await ctx.reply(
+      `🖼️ <b>Real Image Custom Emoji Detected!</b>\n\n🆔 <b>Custom Emoji ID:</b> <code>${eid}</code>\n\nTo attach this real image emoji to a category or button, send:\n<code>/setemoji <category_name> ${eid}</code>\n\n<i>Example: /setemoji github ${eid}</i>`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  // User sends quantity number (e.g. "1" matching Screenshot 5)
+  if (/^\d+$/.test(txt)) {
+    const pid = userViewingProduct.get(ctx.from!.id) || 'p-github-student';
+    const p: any = PRODUCTS.find((x) => x.id === pid);
+    if (p) {
+      const qty = Math.max(1, parseInt(txt, 10));
+      const user = await getOrRegisterUser(ctx.from!);
+      const { text, kb } = renderOrderSummary(p, qty, user);
+      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+      return;
+    }
   }
 });
 
-bot.catch((e) => console.error('bot error', e));
-bot.start();
-console.log('TZ Store bot running (polling)');
+bot.command('setemoji', async (ctx) => {
+  const parts = (ctx.match || '').trim().split(/\s+/);
+  const key = parts[0]?.toLowerCase();
+  let emojiId = parts[1];
+
+  const customEmojiEntity = ctx.message?.entities?.find((e) => e.type === 'custom_emoji');
+  if (customEmojiEntity && (customEmojiEntity as any).custom_emoji_id) {
+    emojiId = (customEmojiEntity as any).custom_emoji_id;
+  }
+
+  if (!key) {
+    await ctx.reply(
+      'ℹ️ <b>How to set a real image custom emoji:</b>\n\n1. Send <code>/setemoji &lt;category&gt; &lt;emoji&gt;</code>\nExample: <code>/setemoji github 🐙</code> (using a custom emoji from a sticker pack)\n\n<b>Available categories:</b>\n<code>github, capcut, grok, canva, chatgpt, loveable, gemini, claude, email, tz-vip, youtube, muse-ai, telegram-premium, figma, vpn, duolingo, leonardo</code>\n\n<b>UI Buttons:</b>\n<code>products, deposit, referrals, orders, support, about, api, back</code>',
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  if (!emojiId) {
+    await ctx.reply(
+      `⚠️ Please include the custom emoji or its ID.\nExample: <code>/setemoji ${key} &lt;custom_emoji&gt;</code> or send any custom emoji in chat.`,
+      { parse_mode: 'HTML' }
+    );
+    return;
+  }
+
+  setCustomEmoji(key, emojiId);
+  await ctx.reply(
+    `✅ <b>Real Image Custom Emoji saved!</b>\n\n🔑 <b>Key:</b> <code>${key}</code>\n🆔 <b>Custom Emoji ID:</b> <code>${emojiId}</code>\n\nButtons and text for <b>${key}</b> will now display this real image emoji!`,
+    { parse_mode: 'HTML' }
+  );
+});
+
+bot.command('emojis', async (ctx) => {
+  const all = getAllCustomEmojis();
+  const lines = Object.entries(all).map(([k, v]) => `• <b>${k}</b>: ${v ? `<code>${v}</code> ✅` : '<i>(default unicode emoji)</i>'}`);
+  await ctx.reply(
+    `🎨 <b>Real Image Custom Emojis Registry:</b>\n\n${lines.join('\n')}\n\nTo assign any custom emoji from a sticker pack:\n<code>/setemoji &lt;key&gt; &lt;custom_emoji&gt;</code>`,
+    { parse_mode: 'HTML' }
+  );
+});
+
+bot.command('products', async (ctx) => {
+  await ctx.reply('🛒 <b>Choose a category:</b>', {
+    parse_mode: 'HTML',
+    reply_markup: categoriesKb(),
+  });
+});
+
+bot.command('deposit', async (ctx) => {
+  const kb = new InlineKeyboard()
+    .text('⭐ Telegram Stars (Auto)', 'dep:STARS').row()
+    .text('🟡 Binance UID', 'dep:BINANCE').row()
+    .text('🅣 USDT TRC20 (Auto)', 'dep:TRC20').row()
+    .text('🅑 Bitcoin (Auto)', 'dep:BTC').row()
+    .text('🔙 Back', 'menu:home');
+
+  await ctx.reply(
+    '💳 <b>Select a payment method:</b>\n\n⚡ <i>All deposit methods are auto-detected & instant:</i>\n• ⭐ <b>Telegram Stars:</b> 1-Tap in-app deposit\n• 🟡 <b>Binance UID:</b> Zero fee internal transfer\n• 🅣 <b>USDT TRC20:</b> Instant on-chain credit\n• 🅑 <b>Bitcoin:</b> Instant on-chain credit',
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
+});
+
+bot.command('orders', async (ctx) => {
+  let userOrders = store.myOrders(String(ctx.from!.id));
+  const txt = userOrders.length
+    ? userOrders.map((o) => `• <b>${o.productId}</b> ×${o.qty} — $${o.total.toFixed(2)} [${o.status}]`).join('\n')
+    : 'No orders placed yet. Tap Products to get started!';
+
+  const kb = new InlineKeyboard().text('🛍️ Products', 'menu:products').row().text('🔙 Back', 'menu:home');
+  await ctx.reply(`🎁 <b>My Orders</b>\n\n${txt}\n\n🌐 View on web: ${WEBAPP}/orders`, {
+    parse_mode: 'HTML',
+    reply_markup: kb,
+  });
+});
+
+bot.command('support', async (ctx) => {
+  const kb = new InlineKeyboard().url('💬 Contact Support', SUPPORT).row().text('🔙 Back', 'menu:home');
+  await ctx.reply(
+    `🛟 <b>Support & Assistance</b>\n\nNeed help with an order, replacement, or inquiry?\nOur dedicated support team is available 24/7.\n\n💬 <b>Direct Support:</b> @TZStoreSupport\n📢 <b>Official Channel:</b> @TZStoreChannel`,
+    { parse_mode: 'HTML', reply_markup: kb }
+  );
+});
+
+bot.catch((e) => console.error('Bot error:', e));
+
+bot.start({
+  onStart: async (info) => {
+    console.log(`TZ Store Bot @${info.username} is running and connected!`);
+    await bot.api.setMyCommands([
+      { command: 'start', description: 'Start Store & Profile' },
+      { command: 'products', description: 'Browse Categories & Products' },
+      { command: 'deposit', description: 'Deposit Funds' },
+      { command: 'orders', description: 'View My Orders' },
+      { command: 'emojis', description: 'View Real Image Custom Emojis' },
+      { command: 'setemoji', description: 'Set Real Image Custom Emoji' },
+      { command: 'support', description: 'Customer Support' },
+    ]).catch(() => {});
+  },
+});
