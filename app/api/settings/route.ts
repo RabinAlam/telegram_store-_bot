@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { db } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import { getAdminFromRequest, audit } from '@/lib/admin-jwt';
 
 const SECRET_KEYS = new Set(['botToken', 'binanceSecret', 'binanceApiKey', 'binanceSpotApiKey', 'binanceSpotSecret']);
@@ -54,10 +55,14 @@ export async function PUT(req: Request) {
 
   try {
     const before = await prisma.setting.findUnique({ where: { key: parsed.data.key } });
+    const jsonVal = parsed.data.value === null
+      ? Prisma.JsonNull
+      : (parsed.data.value as Prisma.InputJsonValue);
+
     await prisma.setting.upsert({
       where: { key: parsed.data.key },
-      update: { value: parsed.data.value as object },
-      create: { key: parsed.data.key, value: parsed.data.value as object },
+      update: { value: jsonVal },
+      create: { key: parsed.data.key, value: jsonVal },
     });
 
     const isSecret = SECRET_KEYS.has(parsed.data.key);
@@ -67,8 +72,8 @@ export async function PUT(req: Request) {
     await audit(admin.id, 'setting:update', 'setting', parsed.data.key, auditBefore, auditAfter, clientIp);
 
     return NextResponse.json({ ok: true });
-  } catch (e) {
+  } catch (e: any) {
     console.error('Settings PUT error:', e);
-    return NextResponse.json({ error: 'failed to save setting' }, { status: 500 });
+    return NextResponse.json({ error: e?.message || 'failed to save setting' }, { status: 500 });
   }
 }
