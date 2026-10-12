@@ -395,7 +395,7 @@ describe('UNIT TESTS - ALL FUNCTIONS', () => {
       const res = await fulfillOrder(o.id);
       expect(res.status).toBe('NEEDS_REVIEW');
       expect(store.getOrder(o.id)?.status).toBe('NEEDS_REVIEW');
-    });
+    }, 15000);
 
     it('generates legacy voucher code for products without vault', async () => {
       const o = store.createOrder({

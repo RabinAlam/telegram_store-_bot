@@ -37,8 +37,8 @@ const WEBAPP = process.env.WEBAPP_URL ?? 'https://merry-gelato-5debd2.netlify.ap
 const CHANNEL = process.env.CHANNEL_URL ?? 'https://t.me/TZStoreChannel';
 const SUPPORT = process.env.SUPPORT_URL ?? 'https://t.me/TZStoreSupport';
 const STORE_UID = process.env.BINANCE_UID ?? '1134278389';
-const SPOT_KEY = process.env.BINANCE_SPOT_API_KEY ?? 'h4KZqphpoRhBYXd7goytBI5GkAEQjNvRy3taNzkfNjW0rCwuvnslZo1xdDFJAnEK';
-const SPOT_SECRET = process.env.BINANCE_SPOT_SECRET ?? 'Pa8yw3EfPa506YYOJNrD1J56Z0pZqhPNaFuCDECIKj1CrOp8WovY48DjRAGhs13E';
+const SPOT_KEY = process.env.BINANCE_SPOT_API_KEY ?? '8AC5IBHuLtYmwxP3aqvdh3YUKySlXmJCEUdC7x1sKjbd9C4ODscox0ExcDW3YjM6';
+const SPOT_SECRET = process.env.BINANCE_SPOT_SECRET ?? 'ainPYiuOTrnNMfyi99NQ62A6jsgk7l29WdmHnAs6kfXeFKEXndzWB5aAGaoR8Uvs';
 const ADMIN_CHAT = process.env.ADMIN_NOTIFY_CHAT_ID ?? '';
 
 // Lazy Prisma Client for Supabase
@@ -146,12 +146,24 @@ async function adjustUserBalance(telegramId: number, delta: number): Promise<num
 
 // Binance Spot check
 async function findDepositByTxid(txid: string): Promise<{ amount: number; coin: string; txId: string } | null> {
-  if (!SPOT_KEY || !SPOT_SECRET) return null;
+  let activeKey = SPOT_KEY;
+  let activeSecret = SPOT_SECRET;
+  if (prisma) {
+    try {
+      const [dbK, dbS] = await Promise.all([
+        prisma.setting.findUnique({ where: { key: 'binanceSpotApiKey' } }),
+        prisma.setting.findUnique({ where: { key: 'binanceSpotSecret' } }),
+      ]);
+      if (typeof dbK?.value === 'string' && dbK.value.trim().length > 10) activeKey = dbK.value.trim();
+      if (typeof dbS?.value === 'string' && dbS.value.trim().length > 10) activeSecret = dbS.value.trim();
+    } catch {}
+  }
+  if (!activeKey || !activeSecret) return null;
   try {
     const qs = new URLSearchParams({ coin: 'USDT', limit: '100', timestamp: String(Date.now()), recvWindow: '10000' }).toString();
-    const sig = crypto.createHmac('sha256', SPOT_SECRET).update(qs).digest('hex');
+    const sig = crypto.createHmac('sha256', activeSecret).update(qs).digest('hex');
     const r = await fetch(`https://api.binance.com/sapi/v1/capital/deposit/hisrec?${qs}&signature=${sig}`, {
-      headers: { 'X-MBX-APIKEY': SPOT_KEY },
+      headers: { 'X-MBX-APIKEY': activeKey },
     });
     if (!r.ok) return null;
     const list = (await r.json()) as Array<{ amount: string; coin: string; txId?: string; status?: number }>;

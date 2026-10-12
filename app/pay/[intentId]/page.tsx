@@ -77,14 +77,16 @@ export default function Pay({ params }: { params: { intentId: string } }) {
   }
   if (!intent) return <main className="pt-4"><Card>Loading payment…</Card></main>;
   const mm = Math.floor(secs / 60); const ss = String(secs % 60).padStart(2, '0');
+  const rawUid = process.env.NEXT_PUBLIC_BINANCE_UID || '1134278389';
+  const storeUid = (rawUid && !rawUid.includes('*') && rawUid.length >= 6) ? rawUid : '1134278389';
   return (
     <main className="pt-4 space-y-3">
       <Card>
         <div className="font-bold">{intent.provider === 'STARS' ? '⭐ Telegram Stars' : intent.asset} payment</div>
         <p className="mt-1 text-sm">Amount: <b>{intent.amount} {intent.asset}</b></p>
         {intent.provider === 'BINANCE' && (
-          <p className="mt-2 rounded-[10px] bg-blue-50 p-2.5 text-sm">📩 Send to store UID: <b><code>{process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389'}</code></b>{' '}
-            <button className="tight ml-1 text-[#4A90D9] underline" onClick={() => copy(process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389')}>Copy</button>
+          <p className="mt-2 rounded-[10px] bg-blue-50 p-2.5 text-sm">📩 Send to store UID: <b><code>{storeUid}</code></b>{' '}
+            <button className="tight ml-1 text-[#4A90D9] underline" onClick={() => copy(storeUid)}>Copy</button>
           </p>
         )}
         {intent.address && intent.provider !== 'BINANCE' && <p className="mt-1 break-all text-sm">Address/UID: <b>{intent.address}</b> <button className="tight ml-2 text-[#4A90D9] underline" onClick={() => copy(intent.address)}>Copy</button></p>}

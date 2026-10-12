@@ -9,3 +9,6 @@ tsconfig.tsbuildinfo
 .netlify
 *.deb
 .venv/
+.agents/
+.opencode/
+skills-lock.json

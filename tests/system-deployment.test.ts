@@ -113,7 +113,7 @@ describe('SYSTEM TESTS (End-to-End Live Workflow & Data Flow)', { timeout: 15000
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.referralPercent).toBeDefined();
-    expect(data.binanceUid).toBe('1134278389');
+    expect(String(data.binanceUid)).toBe('1134278389');
   });
 
   it('Step 6: User management queries Supabase users table', async () => {

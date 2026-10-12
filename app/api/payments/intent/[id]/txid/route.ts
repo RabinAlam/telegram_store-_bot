@@ -28,8 +28,8 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     } catch {}
   }
   if (!it) return NextResponse.json({ error: 'not found' }, { status: 404 });
+  // If already completed, return early
   if (it.status === 'CONFIRMED' || it.status === 'FULFILLED') return NextResponse.json({ ok: true, state: 'already', intent: it });
-  if (it.status === 'CANCELLED' || it.status === 'EXPIRED') return NextResponse.json({ error: 'deposit expired — create a new one' }, { status: 400 });
 
   // Enforce uniqueness to prevent TxID replay / double spending
   const normalizedTxid = p.data.txid.toLowerCase();
@@ -40,14 +40,51 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     return NextResponse.json({ error: 'This TxID / Order ID has already been credited to another order' }, { status: 400 });
   }
 
-  store.setIntent(it.id, { txHash: p.data.txid });
+  // Check on Binance FIRST before rejecting on expiration:
+  // If user paid but 20m passed, we must still honor the payment!
+  const isExpired = it.status === 'CANCELLED' || it.status === 'EXPIRED';
   const check = await checkTxidOnBinance(p.data.txid, it.amount);
+
   if (check.state === 'matched') {
-    store.setIntent(it.id, { status: 'CONFIRMED' });
+    const matchedHash = check.txid || p.data.txid;
+    store.setIntent(it.id, { txHash: matchedHash, status: 'CONFIRMED' });
+    store.setOrderStatus(it.orderId, 'PENDING');
+
+    if (!process.env.VITEST) {
+      try {
+        const { db } = await import('@/lib/db');
+        const prisma = db();
+        if (prisma) {
+          await prisma.order.update({
+            where: { orderNo: it.orderId },
+            data: { txid: matchedHash, binancePayOrderNo: matchedHash, paymentStatus: 'PENDING' },
+          }).catch(() => null);
+          await prisma.setting.upsert({
+            where: { key: `intent:${it.id}` },
+            create: { key: `intent:${it.id}`, value: { ...it, txHash: matchedHash, status: 'CONFIRMED' } as any },
+            update: { value: { ...it, txHash: matchedHash, status: 'CONFIRMED' } as any },
+          }).catch(() => null);
+        }
+      } catch {}
+    }
+
     await fulfillOrder(it.orderId);
     const order = store.getOrder(it.orderId);
-    return NextResponse.json({ ok: true, state: 'matched', message: `✅ Verified on Binance — $${(check.amount ?? it.amount).toFixed(2)} received.`, intent: store.getIntent(it.id), orderStatus: order?.status });
+    return NextResponse.json({
+      ok: true,
+      state: 'matched',
+      message: `✅ Verified on Binance — $${(check.amount ?? it.amount).toFixed(2)} received.`,
+      intent: store.getIntent(it.id),
+      orderStatus: order?.status,
+    });
   }
+
+  // If not matched and intent was expired/cancelled, reject now
+  if (isExpired) {
+    return NextResponse.json({ error: 'Deposit expired and no matching Binance payment found. Create a new deposit or contact support.' }, { status: 400 });
+  }
+
+  store.setIntent(it.id, { txHash: p.data.txid });
   if (check.state === 'not-found') {
     store.setIntent(it.id, { status: 'NEEDS_REVIEW' });
     store.setOrderStatus(it.orderId, 'NEEDS_REVIEW');

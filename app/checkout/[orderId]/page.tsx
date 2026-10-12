@@ -30,6 +30,8 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
   const [toast, setToast] = useState<string | null>(null);
   const [paying, setPaying] = useState<string | null>(null);
   const [binanceOpen, setBinanceOpen] = useState(false);
+  const rawUid = process.env.NEXT_PUBLIC_BINANCE_UID || '1134278389';
+  const storeUid = (rawUid && !rawUid.includes('*') && rawUid.length >= 6) ? rawUid : '1134278389';
 
   useEffect(() => backButton(() => router.back()), [router]);
 
@@ -219,10 +221,10 @@ export default function Checkout({ params }: { params: { orderId: string } }) {
                   <div className="mt-2 rounded-[14px] border border-[#4A90D9]/30 bg-blue-50/40 p-3">
                     <p className="rounded-[10px] bg-white p-2.5 text-[13px] text-gray-700">
                       📩 Send <b>exactly {money(order.total)}</b> to store UID:{' '}
-                      <code className="font-bold text-gray-900">{process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389'}</code>{' '}
+                      <code className="font-bold text-gray-900">{storeUid}</code>{' '}
                       <button
                         type="button"
-                        onClick={() => { navigator.clipboard?.writeText(process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389'); setToast('Store UID copied'); }}
+                        onClick={() => { navigator.clipboard?.writeText(storeUid); setToast('Store UID copied'); }}
                         className="tight ml-1 text-[#4A90D9] underline"
                       >
                         Copy

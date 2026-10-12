@@ -45,8 +45,9 @@ export async function POST(req: Request) {
     intent = store.createIntent({ id, orderId: order.id, provider: 'STARS', asset: 'XTR', amount: stars, memo: id, status: 'PENDING', expiresAt });
     extraJson = { invoiceLink: link, stars };
   } else if (p.data.provider === 'BINANCE') {
-    const storeUid = process.env.NEXT_PUBLIC_BINANCE_UID ?? '1134278389';
-    const address = p.data.binanceUid?.trim() || storeUid;
+    const rawUid = process.env.NEXT_PUBLIC_BINANCE_UID || process.env.BINANCE_UID || '1134278389';
+    const storeUid = (rawUid && !rawUid.includes('*') && rawUid.length >= 6) ? rawUid : '1134278389';
+    const address = (p.data.binanceUid && !p.data.binanceUid.includes('*')) ? p.data.binanceUid.trim() : storeUid;
     intent = store.createIntent({ id, orderId: order.id, provider: 'BINANCE', asset: 'BINANCE-UID', amount: order.total, address, memo: id, status: 'PENDING', expiresAt });
   } else {
     const asset = p.data.provider === 'TRC20' ? 'USDT-TRC20' : p.data.provider === 'BEP20' ? 'USDT-BEP20' : 'BTC';

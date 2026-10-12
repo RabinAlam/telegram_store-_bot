@@ -35,7 +35,31 @@ export async function spotGet<T>(path: string, params: Record<string, string>, a
 
 export async function getDepositHistory(apiKey: string, secret: string, coin = 'USDT'): Promise<SpotDeposit[]> {
   if (!apiKey || !secret) throw new Error('spot api keys not configured');
-  return spotGet<SpotDeposit[]>('/sapi/v1/capital/deposit/hisrec', { coin }, apiKey, secret);
+  const onChain = await spotGet<SpotDeposit[]>('/sapi/v1/capital/deposit/hisrec', { coin }, apiKey, secret).catch(() => []);
+
+  // Also include Binance Pay transactions for internal / UID transfers
+  let payDeposits: SpotDeposit[] = [];
+  try {
+    const payRes = await spotGet<{ data?: Array<{ orderId?: string; transactionId?: string; amount?: string; currency?: string; transactionTime?: number }> }>(
+      '/sapi/v1/pay/transactions',
+      { limit: '50' },
+      apiKey,
+      secret,
+    );
+    if (payRes && payRes.data) {
+      payDeposits = payRes.data
+        .filter((p) => !coin || (p.currency || '').toUpperCase() === coin.toUpperCase())
+        .map((p) => ({
+          amount: String(Math.abs(Number(p.amount))),
+          coin: p.currency || 'USDT',
+          txId: p.orderId || p.transactionId,
+          status: 1,
+          insertTime: p.transactionTime,
+        }));
+    }
+  } catch {}
+
+  return [...(Array.isArray(onChain) ? onChain : []), ...payDeposits];
 }
 
 // Pure matcher — unit tested. Amount tolerance 0.01 USDT.

@@ -11,11 +11,32 @@ export default function Settings() {
   const [tab, setTab] = useState<(typeof TABS)[number]>('Bot');
   const [form, setForm] = useState<Record<string, string>>({});
   const [pwd, setPwd] = useState({ cur: '', next: '' });
+  const [testingBinance, setTestingBinance] = useState(false);
+  const [binanceTestResult, setBinanceTestResult] = useState<any>(null);
   const settings = useQuery({ queryKey: ['settings'], queryFn: () => get('/api/settings') as Promise<Record<string, unknown>> });
   const s = settings.data ?? {};
   const val = (k: string) => displaySettingValue(form, s, k);
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
   const secretPh = (k: string) => secretPlaceholder(s[k]);
+
+  async function testBinance() {
+    setTestingBinance(true);
+    setBinanceTestResult(null);
+    try {
+      const res = (await get('/api/admin/binance/test')) as any;
+      setBinanceTestResult(res);
+      if (res.ok) {
+        toast('✅ Binance API is active & connected!');
+      } else {
+        toast(`❌ ${res.error || 'Connection failed'}`);
+      }
+    } catch (e: any) {
+      setBinanceTestResult({ ok: false, error: e.message || 'Network error' });
+      toast('❌ Failed to test Binance API');
+    } finally {
+      setTestingBinance(false);
+    }
+  }
 
   async function save(keys: string[], parseJson: string[] = []) {
     try {
@@ -25,7 +46,7 @@ export default function Settings() {
         const value = parseJson.includes(k) ? JSON.parse(raw || '{}') : (isNaN(Number(raw)) || raw === '' ? raw : Number(raw));
         await api('/api/settings', { method: 'PUT', body: JSON.stringify({ key: k, value }) });
       }
-      toast('Settings saved'); setForm({}); settings.refetch();
+      toast('✅ Settings saved successfully'); setForm({}); settings.refetch();
     } catch (e) { toast(e instanceof Error ? e.message : 'failed'); }
   }
 
@@ -51,14 +72,50 @@ export default function Settings() {
             <div className="md:col-span-2"><Button onClick={() => save(['botToken', 'adminNotifyChatId', 'supportUrl', 'channelUrl'])}>Save bot settings</Button></div>
           </div></Card>}
           {tab === 'Payments' && <div className="space-y-3">
-            <Card><h3 className="font-bold">🟡 Personal Binance account <span className="text-xs font-normal text-slate-500">(no merchant needed — recommended)</span></h3>
+            <Card>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-bold">🟡 Personal Binance account <span className="text-xs font-normal text-slate-500">(no merchant needed — recommended)</span></h3>
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  Active on Server
+                </span>
+              </div>
               <p className="mt-1 text-xs text-slate-500">Buyers send USDT to your UID, submit the TXID/Order ID, and the panel auto-checks your Spot deposit history. UID-to-UID transfers still need one-tap manual approve.</p>
+              
+              {binanceTestResult && (
+                <div className={`mt-3 rounded-xl p-3 text-xs ${binanceTestResult.ok ? 'bg-emerald-50 text-emerald-800 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                  {binanceTestResult.ok ? (
+                    <div>
+                      <p className="font-bold text-sm">✅ Binance API Connected Successfully!</p>
+                      <p className="mt-1">🔑 Key: <code>{binanceTestResult.keyMasked}</code></p>
+                      <p>📖 Read Access: {binanceTestResult.permissions?.enableReading ? 'Enabled ✅' : 'Disabled ❌'}</p>
+                      <p>💳 Recent Transfers Found: {binanceTestResult.recentPayTransactions} records</p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="font-bold text-sm">❌ Connection Error:</p>
+                      <p className="mt-1">{binanceTestResult.error}</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="mt-2 grid gap-3 md:grid-cols-2">
                 <Field label="Store Binance UID (shown to buyers)"><Input value={val('binanceUid')} onChange={(e) => set('binanceUid', e.target.value)} placeholder="e.g. 1134278389" inputMode="numeric" /></Field>
                 <Field label="Spot API Key (auto-verify)"><Input value={val('binanceSpotApiKey')} onChange={(e) => set('binanceSpotApiKey', e.target.value)} placeholder={secretPh('binanceSpotApiKey')} /></Field>
                 <Field label="Spot API Secret"><Input type="password" value={val('binanceSpotSecret')} onChange={(e) => set('binanceSpotSecret', e.target.value)} placeholder={secretPh('binanceSpotSecret')} /></Field>
               </div>
-              <div className="mt-2"><Button onClick={() => save(['binanceUid', 'binanceSpotApiKey', 'binanceSpotSecret'])}>Save personal account</Button></div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button onClick={() => save(['binanceUid', 'binanceSpotApiKey', 'binanceSpotSecret'])}>Save personal account</Button>
+                <button
+                  type="button"
+                  disabled={testingBinance}
+                  onClick={testBinance}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                >
+                  {testingBinance ? '⚡ Testing Connection…' : '⚡ Test Binance Connection'}
+                </button>
+              </div>
             </Card>
             <Card><h3 className="font-bold">🏦 Binance Pay merchant <span className="text-xs font-normal text-slate-500">(optional — only with merchant account)</span></h3>
               <div className="mt-2 grid gap-3 md:grid-cols-2">
